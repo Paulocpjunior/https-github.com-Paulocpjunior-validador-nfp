@@ -1,0 +1,5 @@
+{
+  "name": "Assistente NFP Pro Cloud",
+  "description": "Um assistente de IA para automatizar a gestão de Nota Fiscal Paulistana (NFP) para contabilidades, integrado com Google AI Studio e Google Cloud Functions.",
+  "requestFramePermissions": []
+}
