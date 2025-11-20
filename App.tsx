@@ -1,8 +1,6 @@
-
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
-import { FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink } from 'lucide-react';
+import { HelpCircle, FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink, Clock, Trash2, ClipboardCopy } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,7 +9,8 @@ import remarkGfm from 'remark-gfm';
 interface GcpConfig {
   projectId: string;
   region: 'southamerica-east1' | 'us-central1' | 'us-east1';
-  deployed: boolean;
+  configured: boolean;
+  connectionVerified: boolean;
   endpoints: {
     validarCertificado: string;
     consultarNFP: string;
@@ -84,12 +83,45 @@ interface Log {
     tipo: 'info' | 'success' | 'warning' | 'error';
 }
 
-interface DeployLog {
-    time: string;
-    msg: string;
+interface Agendamento {
+    id: number;
+    clientId: number;
+    periodo: string; // MM/YYYY
+    dataAgendamento: string; // ISO string
+    status: 'agendado' | 'executado' | 'erro';
+    executadoEm?: string; // ISO string
+    log?: string;
 }
 
-type Aba = 'deploy' | 'certificados' | 'clientes' | 'resultados' | 'graficos' | 'comparacao' | 'historico' | 'alertas' | 'codigo';
+type Aba = 'conectar' | 'certificados' | 'clientes' | 'resultados' | 'graficos' | 'comparacao' | 'historico' | 'alertas' | 'codigo' | 'agendamento';
+
+// --- COMPONENTE DE LOGS REUTILIZÁVEL ---
+const LogViewer = ({ logs, title = "Logs de Processamento" }: { logs: Log[], title?: string }) => {
+    const Icon = ({ tipo }: { tipo: Log['tipo'] }) => {
+        switch (tipo) {
+            case 'success': return <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />;
+            case 'error': return <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />;
+            case 'warning': return <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />;
+            default: return <FileText className="w-4 h-4 text-blue-500 flex-shrink-0" />;
+        }
+    };
+    return (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 h-full">
+            <h2 className="font-bold mb-4 flex items-center gap-2 text-lg"><FileText className="w-5 h-5" />{title}</h2>
+            <div className="bg-gray-900 rounded p-3 h-[calc(100%-40px)] min-h-[50vh] overflow-y-auto text-xs font-mono">
+                {logs.map(l => (
+                    <div key={l.id} className="flex items-start gap-2 mb-1">
+                        <Icon tipo={l.tipo} />
+                        <span className="text-gray-400">{l.time}</span>
+                        <span className={`break-all ${l.tipo === 'error' ? 'text-red-400' : l.tipo === 'success' ? 'text-green-400' : l.tipo === 'warning' ? 'text-yellow-400' : 'text-gray-300'}`}>{l.msg}</span>
+                    </div>
+                ))}
+                {logs.length === 0 && <p className="text-gray-500">Aguardando processamento...</p>}
+            </div>
+        </div>
+    );
+};
+
 
 // --- COMPONENTE PRINCIPAL DO APP ---
 export default function App() {
@@ -104,8 +136,9 @@ export default function App() {
     const [logs, setLogs] = useState<Log[]>([]);
     const [comparacao, setComparacao] = useState<ComparisonItem[]>([]);
     const [filtros, setFiltros] = useState({ busca: '', status: 'todos' });
-    const [aba, setAba] = useState<Aba>('deploy');
+    const [aba, setAba] = useState<Aba>('certificados');
     const [certificados, setCertificados] = useState<Certificate[]>([]);
+    const [certBusca, setCertBusca] = useState('');
     const [uploadingCert, setUploadingCert] = useState(false);
     const [certValidando, setCertValidando] = useState<number | null>(null);
     const [selectedHistoryItem, setSelectedHistoryItem] = useState<HistoryItem | null>(null);
@@ -114,22 +147,30 @@ export default function App() {
     const [activeChartIndex, setActiveChartIndex] = useState<number | null>(null);
     const [expandedAlerts, setExpandedAlerts] = useState<string[]>([]);
     const [reportModal, setReportModal] = useState({ isOpen: false, content: '' });
+    const [testingConnection, setTestingConnection] = useState(false);
+    const [helpModalOpen, setHelpModalOpen] = useState(false);
+    const [connectionError, setConnectionError] = useState<string | null>(null);
+    const [agendamentos, setAgendamentos] = useState<Agendamento[]>([]);
+    const [novoAgendamento, setNovoAgendamento] = useState({
+        clientId: '',
+        periodo: `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`,
+        data: new Date(Date.now() + 60000 * 5).toISOString().slice(0, 16), // 5 minutes from now
+    });
 
 
     const [gcpConfig, setGcpConfig] = useState<GcpConfig>({
         projectId: '',
         region: 'southamerica-east1',
-        deployed: false,
+        configured: false,
+        connectionVerified: false,
         endpoints: {
             validarCertificado: '',
             consultarNFP: '',
             healthCheck: ''
         }
     });
-    const [deployStatus, setDeployStatus] = useState<'pending' | 'deploying' | 'deployed'>('pending');
-    const [deployLogs, setDeployLogs] = useState<DeployLog[]>([]);
+    const [configStatus, setConfigStatus] = useState<'pending' | 'configuring' | 'configured'>('pending');
 
-    const COLORS = ['#10B981', '#F59E0B', '#EF4444'];
     const PIE_COLORS = { ok: '#10B981', alertas: '#F59E0B' };
 
     // --- EFEITOS (EFFECTS) ---
@@ -148,7 +189,7 @@ export default function App() {
             if (saved) {
               const parsed = JSON.parse(saved);
               setGcpConfig(parsed);
-              if(parsed.deployed) setDeployStatus('deployed');
+              if(parsed.configured) setConfigStatus('configured');
             }
             const hist = localStorage.getItem('nfp_historico');
             if (hist) setHistorico(JSON.parse(hist));
@@ -156,6 +197,9 @@ export default function App() {
             if (certs) setCertificados(JSON.parse(certs));
             const savedClientes = localStorage.getItem('nfp_clientes');
             if (savedClientes) setClientes(JSON.parse(savedClientes));
+            const agends = localStorage.getItem('nfp_agendamentos');
+            if (agends) setAgendamentos(JSON.parse(agends));
+
         } catch (e) {
           console.error("Failed to load data from localStorage", e);
         }
@@ -166,17 +210,32 @@ export default function App() {
             localStorage.setItem('nfp_gcp_config', JSON.stringify(gcpConfig));
             localStorage.setItem('nfp_certificados', JSON.stringify(certificados));
             localStorage.setItem('nfp_clientes', JSON.stringify(clientes));
+            localStorage.setItem('nfp_agendamentos', JSON.stringify(agendamentos));
         } catch (e) {
             console.error("Failed to save data to localStorage", e);
         }
-    }, [gcpConfig, certificados, clientes]);
+    }, [gcpConfig, certificados, clientes, agendamentos]);
 
     // --- FUNÇÕES AUXILIARES ---
-    const addLog = (msg: string, tipo: Log['tipo'] = 'info') => setLogs(p => [...p.slice(-100), { time: new Date().toLocaleTimeString('pt-BR'), msg, tipo, id: Date.now() }]);
-    const addDeployLog = (msg: string) => setDeployLogs(p => [...p.slice(-100), { time: new Date().toLocaleTimeString('pt-BR'), msg }]);
+    const addLog = useCallback((msg: string, tipo: Log['tipo'] = 'info') => setLogs(p => [...p.slice(-100), { time: new Date().toLocaleTimeString('pt-BR'), msg, tipo, id: Date.now() }]), []);
     const toggleTheme = () => setTheme(prevTheme => prevTheme === 'light' ? 'dark' : 'light');
     const togglePasswordVisibility = (certId: number) => {
         setVisiblePasswords(prev => ({ ...prev, [certId]: !prev[certId] }));
+    };
+
+    const applyCnpjMask = (value: string) => {
+        const v = value.replace(/\D/g, '').slice(0, 14);
+        if (v.length > 12) return v.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, "$1.$2.$3/$4-$5");
+        if (v.length > 8) return v.replace(/^(\d{2})(\d{3})(\d{3})(\d{0,4})/, "$1.$2.$3/$4");
+        if (v.length > 5) return v.replace(/^(\d{2})(\d{3})(\d{0,3})/, "$1.$2.$3");
+        if (v.length > 2) return v.replace(/^(\d{2})(\d{0,3})/, "$1.$2");
+        return v;
+    };
+
+    const copyToClipboard = (text: string) => {
+        if (!text) return;
+        navigator.clipboard.writeText(text);
+        addLog(`📋 Copiado: ${text}`, 'info');
     };
 
     // --- FUNÇÕES PRINCIPAIS ---
@@ -188,36 +247,100 @@ export default function App() {
             alert('❌ Credenciais inválidas. Use: admin@contabilidade.com / admin123');
         }
     };
+    
+    const testarConexao = async () => {
+        if (!gcpConfig.endpoints.healthCheck) {
+            addLog('⚠️ Endpoint de Health Check não configurado.', 'warning');
+            return;
+        }
+        addLog(`🔎 Testando conexão com ${gcpConfig.endpoints.healthCheck}...`, 'info');
+        setGcpConfig(prev => ({...prev, connectionVerified: false}));
+        setConnectionError(null);
+        setTestingConnection(true);
+        try {
+            const response = await fetch(gcpConfig.endpoints.healthCheck);
+            if (response.ok) {
+                const responseText = await response.text();
+                addLog(`✅ Conexão bem-sucedida! Resposta do servidor: "${responseText}"`, 'success');
+                setGcpConfig(prev => ({...prev, connectionVerified: true}));
+            } else {
+                addLog(`❌ Falha na conexão. O servidor respondeu com status ${response.status}.`, 'error');
+                const errorText = `Falha na conexão. O servidor respondeu com status ${response.status}. Isso pode significar que a função não foi implantada com o nome 'healthCheck' ou encontrou um erro interno. Verifique os logs da função no console do Google Cloud para mais detalhes.`;
+                setConnectionError(errorText);
+            }
+        } catch (error) {
+            console.error("Connection Test Error:", error);
+            const errorTitle = '❌ Falha crítica na conexão. Causa provável: Rede, CORS, ou Permissão.';
+            addLog(errorTitle, 'error');
+            const errorDetailsLog = `As causas mais comuns são: 1. Função não pública (não permite invocações não autenticadas). 2. Erro de CORS no backend. 3. URL incorreta (Project ID errado). 4. Erro de rede.`;
+            addLog(errorDetailsLog, 'warning');
 
-    const deployToGoogleCloud = async () => {
-        if (!gcpConfig.projectId) {
+            const errorTextForUI = `**Este erro quase sempre indica um problema de configuração no seu Google Cloud, não um bug no aplicativo.**
+
+Siga este guia para resolver:
+
+### 1. A Causa Mais Comum: Permissões
+
+Sua função precisa ser pública. No Google Cloud, isso significa "permitir invocações não autenticadas".
+
+*   **Ação:** Ao fazer o deploy (ou ao editar uma função existente), na seção **Autenticação**, marque a opção **"Permitir invocações não autenticadas"**.
+*   **Como Verificar:** Após o deploy, cole a URL da sua função \`healthCheck\` no navegador.
+    *   ✅ **Correto:** Você deve ver a palavra \`OK\`.
+    *   ❌ **Incorreto:** Se aparecer uma página de login do Google ou um erro de permissão, a configuração está errada. Volte e corrija.
+
+### 2. Verificação de CORS
+
+Se o passo 1 não resolveu, garanta que sua função está enviando os cabeçalhos de CORS.
+
+*   **Ação:** O código na aba **"Código"** já está configurado. Verifique se o seu \`index.js\` e \`package.json\` no Google Cloud são **idênticos** aos fornecidos aqui. Se fizer alguma alteração, reimplemente a função.
+
+### 3. Verificação do Project ID
+
+Um simples erro de digitação na URL pode causar a falha.
+
+*   **Ação:** Confira se o Project ID que você inseriu nesta página corresponde **exatamente** ao ID do seu projeto no Google Cloud.
+
+Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Logs** da sua função no painel do Google Cloud para encontrar a causa raiz do problema.`;
+            setConnectionError(errorTextForUI);
+        } finally {
+            setTestingConnection(false);
+        }
+    };
+
+    const configurarEndpoints = () => {
+        const projectId = gcpConfig.projectId.trim();
+        if (!projectId) {
             alert('⚠️ Digite o ID do seu projeto Google Cloud!');
             return;
         }
-        setDeployStatus('deploying');
-        setDeployLogs([]);
-        addDeployLog('🚀 Iniciando deploy no Google Cloud...');
-        await new Promise(r => setTimeout(r, 1000));
-        addDeployLog('📦 Empacotando funções...');
-        await new Promise(r => setTimeout(r, 1500));
-        addDeployLog('☁️ Conectando ao Google Cloud Functions...');
-        await new Promise(r => setTimeout(r, 1000));
-        addDeployLog('🔧 Deployando funções (simulação)...');
-        await new Promise(r => setTimeout(r, 3000));
-        addDeployLog('✅ Funções deployadas!');
-        const baseUrl = `https://${gcpConfig.region}-${gcpConfig.projectId}.cloudfunctions.net`;
+
+        // Validação para evitar que o usuário insira uma URL completa
+        const invalidChars = ['/', ':', '.'];
+        if (invalidChars.some(char => projectId.includes(char))) {
+            const errorMsg = "Erro de Formato: O campo 'Project ID' deve conter apenas o ID do seu projeto (ex: 'meu-projeto-123'), não uma URL completa. Por favor, corrija e tente novamente.";
+            alert(errorMsg);
+            addLog(`❌ ${errorMsg}`, 'error');
+            return;
+        }
+        setConnectionError(null);
+        setConfigStatus('configuring');
+        addLog('🔧 Configurando endpoints com base no Project ID...', 'info');
+        const baseUrl = `https://${gcpConfig.region}-${projectId}.cloudfunctions.net`;
+        const newEndpoints = {
+            validarCertificado: `${baseUrl}/validarCertificado`,
+            consultarNFP: `${baseUrl}/consultarNFP`,
+            healthCheck: `${baseUrl}/healthCheck`
+        };
         setGcpConfig(prev => ({
             ...prev,
-            deployed: true,
-            endpoints: {
-                validarCertificado: `${baseUrl}/validarCertificado`,
-                consultarNFP: `${baseUrl}/consultarNFP`,
-                healthCheck: `${baseUrl}/healthCheck`
-            }
+            projectId,
+            configured: true,
+            connectionVerified: false, // Força a re-verificação da conexão
+            endpoints: newEndpoints
         }));
-        addDeployLog('🎉 Deploy concluído com sucesso!');
-        setDeployStatus('deployed');
-        addLog('✅ Backend deployado no Google Cloud (simulação)', 'success');
+        addLog('✅ Endpoints configurados! Teste a conexão para habilitar as funções.', 'success');
+        addLog(`Endpoint Health: ${newEndpoints.healthCheck}`, 'info');
+        setConfigStatus('configured');
     };
 
     const handleCertUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -264,9 +387,9 @@ export default function App() {
         setCertValidando(certId);
         addLog(`🔐 Validando certificado ${cert.nome}...`, 'info');
         try {
-            if (!gcpConfig.endpoints.validarCertificado) {
-                // Simulação de validação se não houver endpoint configurado
-                addLog('⚠️ Endpoint de validação não configurado. Usando simulação local.', 'warning');
+            if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
+                // Simulação de validação
+                addLog('⚠️ Backend não conectado/verificado. Usando simulação local.', 'warning');
                 await new Promise(r => setTimeout(r, 2000));
                 const cnpjSim = Math.random().toString().slice(2, 16);
                 const dataVal = new Date();
@@ -283,23 +406,39 @@ export default function App() {
             } else {
                 // Validação real com Google Cloud Function
                 addLog(`☁️ Enviando para validação no Google Cloud...`, 'info');
-                const response = await fetch(gcpConfig.endpoints.validarCertificado, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        certificateBase64: cert.base64,
-                        password: cert.senha
-                    })
-                });
+                let response;
+                try {
+                    response = await fetch(gcpConfig.endpoints.validarCertificado, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            certificateBase64: cert.base64,
+                            password: cert.senha
+                        })
+                    });
+                } catch (networkError) {
+                    console.error("Network/CORS Error:", networkError);
+                    throw new Error("Erro de rede/CORS. Verifique sua conexão e a configuração de CORS no seu backend. A aba 'Código' contém um exemplo de solução.");
+                }
 
                 if (!response.ok) {
                     const errorData = await response.text();
                     throw new Error(`Erro do servidor: ${response.status} - ${errorData || 'Sem detalhes'}`);
                 }
+                
+                const responseText = await response.text();
+                if (!responseText) {
+                    throw new Error("A resposta da validação do certificado veio vazia do servidor.");
+                }
+    
+                let data;
+                try {
+                    data = JSON.parse(responseText);
+                } catch (jsonError) {
+                    console.error("JSON Parsing Error:", jsonError, "Response was:", responseText);
+                    throw new Error("A resposta da validação do certificado não é um JSON válido.");
+                }
 
-                const data = await response.json();
-
-                // Assumindo que a API retorna { cnpj, razaoSocial, validade }
                 setCertificados(p => p.map(c => c.id === certId ? {
                     ...c,
                     validado: true,
@@ -314,17 +453,16 @@ export default function App() {
             const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
             setCertificados(p => p.map(c => c.id === certId ? { ...c, status: 'inválido' } : c));
             addLog(`❌ Falha na validação: ${errorMessage}`, 'error');
-            alert(`❌ Falha na validação: ${errorMessage}`);
         } finally {
             setCertValidando(null);
         }
     };
     
-    const consultarNFPReal = async (cliente: Client): Promise<Result> => {
-        const periodo = `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`;
+    const consultarNFPReal = async (cliente: Client, periodoOverride?: string): Promise<Result> => {
+        const periodo = periodoOverride || `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`;
     
-        if (!gcpConfig.endpoints.consultarNFP) {
-            addLog(`🔄 Consultando NFP para ${cliente.nome} (simulação)...`, 'info');
+        if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
+            addLog(`🔄 Consultando NFP para ${cliente.nome} (simulação) no período ${periodo}...`, 'info');
             await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
         
             const generateServiceData = (isPrestado: boolean): ServiceData => {
@@ -353,31 +491,48 @@ export default function App() {
                 status: 'sucesso'
             };
         } else {
-            addLog(`☁️ Consultando NFP para ${cliente.nome} via Google Cloud...`, 'info');
+            addLog(`☁️ Consultando NFP para ${cliente.nome} via Google Cloud no período ${periodo}...`, 'info');
             
             const cert = certificados.find(c => c.id === parseInt(cliente.certificadoId, 10));
             if (!cert) {
                 throw new Error(`Certificado não encontrado para ${cliente.nome}`);
             }
     
-            const response = await fetch(gcpConfig.endpoints.consultarNFP, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    cnpj: cliente.cnpj.replace(/\D/g, ''),
-                    im: cliente.im,
-                    periodo,
-                    certificateBase64: cert.base64,
-                    password: cert.senha,
-                })
-            });
+            let response;
+            try {
+                response = await fetch(gcpConfig.endpoints.consultarNFP, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cnpj: cliente.cnpj.replace(/\D/g, ''),
+                        im: cliente.im,
+                        periodo,
+                        certificateBase64: cert.base64,
+                        password: cert.senha,
+                    })
+                });
+            } catch (networkError) {
+                console.error("Network/CORS Error:", networkError);
+                throw new Error("Erro de rede/CORS. Verifique sua conexão e a configuração de CORS no seu backend. A aba 'Código' contém um exemplo de solução.");
+            }
     
             if (!response.ok) {
                 const errorData = await response.text();
                 throw new Error(`Erro do servidor: ${response.status} - ${errorData || 'Sem detalhes'}`);
             }
     
-            const data = await response.json(); // API deve retornar { prestados: ServiceData, tomados: ServiceData, status: 'sucesso' | 'erro' }
+            const responseText = await response.text();
+            if (!responseText) {
+                throw new Error(`A resposta da consulta NFP para ${cliente.nome} veio vazia.`);
+            }
+
+            let data;
+            try {
+                data = JSON.parse(responseText);
+            } catch (jsonError) {
+                console.error("JSON Parsing Error:", jsonError, "Response was:", responseText);
+                throw new Error(`A resposta da consulta NFP para ${cliente.nome} não é um JSON válido.`);
+            }
     
             return {
                 cliente: cliente.nome,
@@ -457,7 +612,7 @@ Seja direto e profissional.`;
         setLogs([]);
         setAnaliseIA('');
         addLog(`🚀 Processando ${ativos.length} cliente(s)...`, 'info');
-        addLog(`☁️ Backend: ${gcpConfig.endpoints.consultarNFP ? 'Google Cloud' : 'Simulação Local'}`, 'info');
+        addLog(`☁️ Backend: ${gcpConfig.configured && gcpConfig.connectionVerified ? 'Google Cloud' : 'Simulação Local'}`, 'info');
         const res: Result[] = [];
         for (const cli of ativos) {
             try {
@@ -544,6 +699,76 @@ Seja direto e profissional.`;
                 : [...prev, cnpj]
         );
     };
+
+    // --- LÓGICA DE AGENDAMENTO ---
+    const handleCriarAgendamento = (e: React.FormEvent) => {
+        e.preventDefault();
+        const { clientId, periodo, data } = novoAgendamento;
+        if (!clientId || !periodo.match(/^\d{2}\/\d{4}$/) || !data) {
+            alert('Preencha todos os campos para agendar. O período deve ser no formato MM/AAAA.');
+            return;
+        }
+
+        const ag: Agendamento = {
+            id: Date.now(),
+            clientId: parseInt(clientId, 10),
+            periodo,
+            dataAgendamento: new Date(data).toISOString(),
+            status: 'agendado',
+        };
+        setAgendamentos(prev => [...prev, ag]);
+        addLog(`🗓️ Nova consulta agendada para ${clientes.find(c => c.id === ag.clientId)?.nome} em ${new Date(ag.dataAgendamento).toLocaleString('pt-BR')}`, 'success');
+    };
+
+    const handleExcluirAgendamento = (id: number) => {
+        setAgendamentos(prev => prev.filter(a => a.id !== id));
+        addLog(`🗑️ Agendamento removido.`, 'info');
+    };
+
+    const executarAgendamento = useCallback(async (agendamento: Agendamento) => {
+        const clientName = clientes.find(c => c.id === agendamento.clientId)?.nome || 'Cliente desconhecido';
+        addLog(`⏰ Executando agendamento para ${clientName} (Período: ${agendamento.periodo})...`, 'info');
+        
+        // Mark as processing by temporarily changing status - prevents re-triggering
+        setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'executado' } : a));
+
+        const cliente = clientes.find(c => c.id === agendamento.clientId);
+        
+        if (!cliente) {
+             addLog(`❌ Cliente do agendamento ID ${agendamento.id} não encontrado.`, 'error');
+             setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'erro', log: 'Cliente não encontrado.', executadoEm: new Date().toISOString() } : a));
+             return;
+        }
+
+        try {
+            const resultado = await consultarNFPReal(cliente, agendamento.periodo);
+            const h: HistoryItem = { id: Date.now(), data: new Date().toLocaleString('pt-BR'), qt: 1, resultados: [resultado] };
+            setHistorico(prev => {
+                const novoHist = [h, ...prev].slice(0, 10);
+                try { localStorage.setItem('nfp_historico', JSON.stringify(novoHist)); } catch (e) { console.error(e); }
+                return novoHist;
+            });
+
+            addLog(`✅ Agendamento para ${cliente.nome} executado com sucesso.`, 'success');
+            setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'executado', executadoEm: new Date().toISOString() } : a));
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : 'Erro desconhecido';
+            addLog(`❌ Erro ao executar agendamento para ${cliente.nome}: ${errorMsg}`, 'error');
+            setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'erro', log: errorMsg, executadoEm: new Date().toISOString() } : a));
+        }
+    }, [addLog, clientes, gcpConfig.configured, gcpConfig.connectionVerified, certificados]);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const agora = new Date();
+            agendamentos.forEach(ag => {
+                if (ag.status === 'agendado' && new Date(ag.dataAgendamento) <= agora) {
+                    executarAgendamento(ag);
+                }
+            });
+        }, 30000); // Check every 30 seconds
+        return () => clearInterval(interval);
+    }, [agendamentos, executarAgendamento]);
     
     // --- LÓGICA DE RENDERIZAÇÃO ---
     const filtrados = resultados.filter(r => {
@@ -551,23 +776,14 @@ Seja direto e profissional.`;
         const s = filtros.status === 'todos' || (filtros.status === 'alertas' ? (r.prestados.semTomador || 0) > 0 : (r.prestados.semTomador || 0) === 0);
         return b && s;
     });
-
-    const Icon = ({ tipo }: { tipo: Log['tipo'] }) => {
-        switch (tipo) {
-            case 'success': return <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />;
-            case 'error': return <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />;
-            case 'warning': return <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />;
-            default: return <FileText className="w-4 h-4 text-blue-500 flex-shrink-0" />;
-        }
-    };
     
     const abas: { id: Aba; icon: React.ElementType; label: string; badge?: () => string | number | null }[] = [
-        { id: 'deploy', icon: Cloud, label: '1. Deploy', badge: () => gcpConfig.deployed ? '✓' : '' },
-        { id: 'certificados', icon: FileKey, label: '2. Certificados', badge: () => certificados.filter(c => c.validado).length || null },
-        { id: 'clientes', icon: Users, label: '3. Clientes', badge: () => clientes.filter(c => c.ativo).length || null },
+        { id: 'certificados', icon: FileKey, label: '1. Certificados', badge: () => certificados.filter(c => c.validado).length || null },
+        { id: 'clientes', icon: Users, label: '2. Clientes', badge: () => clientes.filter(c => c.ativo).length || null },
+        { id: 'conectar', icon: Cloud, label: '3. Conectar Backend', badge: () => gcpConfig.connectionVerified ? '✓' : '' },
+        { id: 'agendamento', icon: Clock, label: '4. Agendamento', badge: () => agendamentos.filter(a => a.status === 'agendado').length || null },
         { id: 'resultados', icon: TrendingUp, label: 'Resultados', badge: () => resultados.length || null },
         { id: 'graficos', icon: BarChart3, label: 'Gráficos' },
-        { id: 'comparacao', icon: TrendingUp, label: 'Comparação' },
         { id: 'historico', icon: Calendar, label: 'Histórico', badge: () => historico.length || null },
         { id: 'alertas', icon: Bell, label: 'Alertas', badge: () => resultados.filter(r => (r.prestados.semTomador || 0) > 0).length || null },
         { id: 'codigo', icon: Code, label: 'Código' }
@@ -582,8 +798,8 @@ Seja direto e profissional.`;
                     <p className="text-gray-500 text-sm mt-2">Plataforma de Automação Fiscal</p>
                 </div>
                 <div className="space-y-4">
-                    <input type="email" placeholder="Email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} className="w-full p-3 border rounded-lg text-gray-800" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
-                    <input type="password" placeholder="Senha" value={login.senha} onChange={e => setLogin({ ...login, senha: e.target.value })} className="w-full p-3 border rounded-lg text-gray-800" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
+                    <input type="email" placeholder="Email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} className="w-full p-3 rounded-lg bg-blue-500 text-white font-bold placeholder-gray-200 border-0 focus:outline-none focus:ring-2 focus:ring-blue-300" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
+                    <input type="password" placeholder="Senha" value={login.senha} onChange={e => setLogin({ ...login, senha: e.target.value })} className="w-full p-3 rounded-lg bg-blue-500 text-white font-bold placeholder-gray-200 border-0 focus:outline-none focus:ring-2 focus:ring-blue-300" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
                     <button onClick={fazerLogin} className="w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors">Entrar</button>
                 </div>
                 <div className="mt-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-700">
@@ -599,12 +815,15 @@ Seja direto e profissional.`;
                 {/* Header */}
                 <header className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-4">
                     <div className="flex justify-between items-center mb-4">
-                        <div>
+                        <div className="flex items-center gap-2">
                              <h1 className="text-2xl font-bold text-blue-600 dark:text-blue-400 flex items-center gap-2">
                                 <Cloud className="w-7 h-7" />
                                 NFP Pro Cloud
                             </h1>
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-1 font-semibold">
+                            <button onClick={() => setHelpModalOpen(true)} className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+                                <HelpCircle className="w-5 h-5 text-gray-500" />
+                            </button>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-1 font-semibold hidden sm:block">
                                 Desenvolvido BY - SP Assessoria Contabil
                             </p>
                         </div>
@@ -623,8 +842,7 @@ Seja direto e profissional.`;
                             return (
                                 <button key={t.id} onClick={() => setAba(t.id)} className={`flex items-center gap-1.5 px-3 py-2 border-b-2 text-sm whitespace-nowrap transition-colors ${aba === t.id ? 'border-blue-600 text-blue-600 dark:text-blue-400 font-semibold' : 'border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'}`}>
                                     <t.icon className="w-4 h-4" />{t.label}
-                                    {/* FIX: Use a ternary operator with a type check to safely compare badgeContent, which can be a string or a number. */}
-                                    {badgeContent && (typeof badgeContent === 'string' ? true : badgeContent > 0) && <span className={`px-1.5 py-0.5 rounded-full text-xs font-mono ${t.id === 'alertas' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'}`}>{badgeContent}</span>}
+                                    {badgeContent && (typeof badgeContent === 'string' || badgeContent > 0) && <span className={`px-1.5 py-0.5 rounded-full text-xs font-mono ${t.id === 'alertas' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'}`}>{badgeContent}</span>}
                                 </button>
                             );
                         })}
@@ -632,95 +850,258 @@ Seja direto e profissional.`;
                 </header>
 
                 <main>
-                    {/* ABA DEPLOY */}
-                    {aba === 'deploy' && (
-                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
-                            <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-gray-800 dark:text-gray-200"><Cloud className="w-5 h-5" />Deploy no Google Cloud Functions</h3>
-                             <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-                                <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">☁️ Por que Google Cloud?</h4>
-                                <ul className="text-sm text-blue-700 dark:text-blue-400 space-y-1 list-disc list-inside">
-                                    <li><strong>Gratuito</strong> - Tier free generoso para começar</li>
-                                    <li><strong>Integrado</strong> - Mesmo ecossistema do Google AI Studio</li>
-                                    <li><strong>Escalável</strong> - Infraestrutura serverless que cresce com você</li>
-                                    <li><strong>Seguro</strong> - Padrões de segurança do Google</li>
-                                </ul>
-                            </div>
-                            <div className="space-y-4">
-                                <div>
-                                    <label className="block text-sm font-medium mb-1">Project ID do Google Cloud *</label>
-                                    <input type="text" value={gcpConfig.projectId} onChange={e => setGcpConfig({ ...gcpConfig, projectId: e.target.value })} placeholder="meu-projeto-nfp" className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
+                    {/* ABA CONECTAR BACKEND */}
+                    {aba === 'conectar' && (
+                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
+                            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                                <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-gray-800 dark:text-gray-200"><Cloud className="w-5 h-5" />Conectar ao Backend no Google Cloud</h3>
+                                 <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+                                    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Como conectar para usar dados reais:</h4>
+                                    <ol className="text-sm text-blue-700 dark:text-blue-400 space-y-2 list-decimal list-inside">
+                                        <li>Vá para a aba <strong>"Código"</strong> e copie o código do backend (`index.js` e `package.json`).</li>
+                                        <li>Faça o deploy dessas 3 funções no seu projeto <strong>Google Cloud Functions</strong>.</li>
+                                        <li className="list-none -ml-5 my-2">
+                                            <div className="bg-yellow-50 dark:bg-yellow-900/50 border border-yellow-200 dark:border-yellow-600 p-2 rounded-md flex items-start gap-2">
+                                                <AlertCircle className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
+                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>IMPORTANTE:</strong> Ao fazer o deploy, permita <strong>invocações não autenticadas</strong> para tornar a função pública.</span>
+                                            </div>
+                                        </li>
+                                        <li>Após o deploy, volte aqui e insira <strong>APENAS o ID do seu projeto</strong> abaixo (ex: <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded text-blue-800 dark:text-blue-300">meu-projeto-12345</code>), não a URL completa.</li>
+                                        <li>Clique em <strong>"Gerar & Configurar Endpoints"</strong> para o app se conectar ao seu backend.</li>
+                                        <li>Clique em <strong>"Testar Conexão"</strong> para verificar e habilitar o modo de dados reais.</li>
+                                    </ol>
                                 </div>
-                                <button onClick={deployToGoogleCloud} disabled={deployStatus === 'deploying' || !gcpConfig.projectId} className={`w-full p-4 rounded-lg font-bold text-white flex items-center justify-center gap-2 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed ${gcpConfig.deployed ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                                    {deployStatus === 'deploying' ? <><Loader2 className="w-5 h-5 animate-spin" />Deployando...</> : gcpConfig.deployed ? <><CheckCircle className="w-5 h-5" />Redeploy</> : <><Zap className="w-5 h-5" />Deploy Automático</>}
-                                </button>
-                            </div>
-                            {deployLogs.length > 0 && (
-                                <div className="mt-6 bg-gray-900 rounded-lg p-4 max-h-60 overflow-y-auto font-mono text-xs">
-                                    <p className="text-green-400 mb-2">Deploy Log (Simulação):</p>
-                                    {deployLogs.map((log, i) => <p key={i} className="text-gray-300">{log.time} {log.msg}</p>)}
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Project ID do Google Cloud *</label>
+                                        <input type="text" value={gcpConfig.projectId} onChange={e => setGcpConfig({ ...gcpConfig, projectId: e.target.value })} placeholder="meu-projeto-nfp" className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
+                                    </div>
+                                    <button onClick={configurarEndpoints} disabled={configStatus === 'configuring' || !gcpConfig.projectId} className={`w-full p-4 rounded-lg font-bold text-white flex items-center justify-center gap-2 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed ${gcpConfig.configured ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                                        {configStatus === 'configuring' ? <><Loader2 className="w-5 h-5 animate-spin" />Configurando...</> : gcpConfig.configured ? <><CheckCircle className="w-5 h-5" />Reconfigurar Endpoints</> : <><Zap className="w-5 h-5" />Gerar & Configurar Endpoints</>}
+                                    </button>
                                 </div>
-                            )}
+                                {gcpConfig.configured && (
+                                    <div className="mt-6 border-t dark:border-gray-700 pt-6">
+                                        <h4 className="font-bold text-md mb-3 flex items-center gap-2">
+                                            Status da Conexão:
+                                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${gcpConfig.connectionVerified ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'}`}>
+                                                {gcpConfig.connectionVerified ? 'Verificada' : 'Não Verificada'}
+                                            </span>
+                                        </h4>
+                                        <div className="space-y-2 text-xs font-mono bg-gray-100 dark:bg-gray-700 p-3 rounded-lg mb-4">
+                                            <p className="truncate"><strong>Health:</strong> {gcpConfig.endpoints.healthCheck}</p>
+                                            <p className="truncate"><strong>Validar:</strong> {gcpConfig.endpoints.validarCertificado}</p>
+                                            <p className="truncate"><strong>Consultar:</strong> {gcpConfig.endpoints.consultarNFP}</p>
+                                        </div>
+                                        {connectionError && !testingConnection && (
+                                            <div className="my-4 bg-red-50 dark:bg-red-900/50 border-l-4 border-red-500 p-4 rounded-r-lg" role="alert">
+                                                <div className="flex">
+                                                    <div className="flex-shrink-0">
+                                                        <XCircle className="h-5 w-5 text-red-400" aria-hidden="true" />
+                                                    </div>
+                                                    <div className="ml-3">
+                                                        <h3 className="text-sm font-medium text-red-800 dark:text-red-300">Erro de Conexão</h3>
+                                                        <div className="mt-2 text-sm text-red-700 dark:text-red-400">
+                                                             <ReactMarkdown
+                                                                remarkPlugins={[remarkGfm]}
+                                                                components={{
+                                                                    h3: ({node, ...props}) => <h3 className="font-bold text-red-800 dark:text-red-300 mt-4 mb-2 text-base" {...props} />,
+                                                                    p: ({node, ...props}) => <p className="mb-2" {...props} />,
+                                                                    ul: ({node, ...props}) => <ul className="list-disc list-inside space-y-1 mb-2" {...props} />,
+                                                                    li: ({node, ...props}) => <li className="pl-2" {...props} />
+                                                                }}
+                                                            >
+                                                                {connectionError}
+                                                            </ReactMarkdown>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                        <button onClick={testarConexao} disabled={testingConnection} className="w-full p-3 rounded-lg font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-wait">
+                                            {testingConnection ? <><Loader2 className="w-4 h-4 animate-spin" /> Testando...</> : <><Zap className="w-4 h-4" /> Testar Conexão</>}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            <LogViewer logs={logs} title="Logs Gerais e de Conexão" />
+                        </div>
+                    )}
+
+                    {/* ABA AGENDAMENTO */}
+                    {aba === 'agendamento' && (
+                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
+                            <div className="space-y-6">
+                                <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                                    <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Clock className="w-5 h-5" />Agendar Nova Consulta</h3>
+                                    <form onSubmit={handleCriarAgendamento} className="space-y-4">
+                                        <div>
+                                            <label className="block text-sm font-medium mb-1">Cliente *</label>
+                                            <select 
+                                                value={novoAgendamento.clientId} 
+                                                onChange={e => setNovoAgendamento(p => ({...p, clientId: e.target.value}))}
+                                                className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600"
+                                                disabled={clientes.filter(c => c.certificadoId).length === 0}
+                                            >
+                                                <option value="">{clientes.filter(c => c.certificadoId).length > 0 ? 'Selecione um cliente com certificado...' : 'Nenhum cliente com certificado'}</option>
+                                                {clientes.filter(c => c.certificadoId).map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium mb-1">Período da Consulta (MM/AAAA) *</label>
+                                            <input 
+                                                type="text" 
+                                                value={novoAgendamento.periodo} 
+                                                onChange={e => setNovoAgendamento(p => ({...p, periodo: e.target.value}))}
+                                                placeholder="MM/AAAA"
+                                                pattern="\d{2}/\d{4}"
+                                                className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium mb-1">Data e Hora para Execução *</label>
+                                            <input 
+                                                type="datetime-local" 
+                                                value={novoAgendamento.data} 
+                                                onChange={e => setNovoAgendamento(p => ({...p, data: e.target.value}))}
+                                                className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600"
+                                            />
+                                        </div>
+                                        <button type="submit" className="w-full p-4 rounded-lg font-bold text-white bg-blue-600 hover:bg-blue-700 flex items-center justify-center gap-2 transition-colors">
+                                            <Calendar className="w-5 h-5" />Agendar Consulta
+                                        </button>
+                                    </form>
+                                </div>
+                                <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                                     <h3 className="font-bold text-lg mb-4">Consultas Agendadas ({agendamentos.length})</h3>
+                                     <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-2">
+                                        {agendamentos.length === 0 && <p className="text-center text-gray-500 dark:text-gray-400 py-4">Nenhuma consulta agendada.</p>}
+                                        {agendamentos.map(ag => {
+                                            const cliente = clientes.find(c => c.id === ag.clientId);
+                                            const statusStyles = {
+                                                agendado: 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/50',
+                                                executado: 'border-green-500 bg-green-50 dark:bg-green-900/50',
+                                                erro: 'border-red-500 bg-red-50 dark:bg-red-900/50',
+                                            };
+                                            return (
+                                                <div key={ag.id} className={`border-l-4 rounded-r-lg p-4 ${statusStyles[ag.status]}`}>
+                                                    <div className="flex justify-between items-start">
+                                                        <div>
+                                                            <p className="font-bold text-gray-800 dark:text-gray-200">{cliente?.nome || 'Cliente não encontrado'}</p>
+                                                            <p className="text-sm text-gray-600 dark:text-gray-400">Período: <span className="font-semibold">{ag.periodo}</span></p>
+                                                            <p className="text-sm text-gray-500 dark:text-gray-500">Agendado para: {new Date(ag.dataAgendamento).toLocaleString('pt-BR')}</p>
+                                                        </div>
+                                                        <div className="flex flex-col items-end gap-2">
+                                                            <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                                                                ag.status === 'agendado' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300' :
+                                                                ag.status === 'executado' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' :
+                                                                'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
+                                                            }`}>{ag.status}</span>
+                                                            <button onClick={() => handleExcluirAgendamento(ag.id)} title="Excluir agendamento" className="p-1 text-gray-400 hover:text-red-500 transition-colors">
+                                                                <Trash2 className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    {ag.status === 'executado' && <p className="text-xs text-green-700 dark:text-green-400 mt-2">Executado em: {new Date(ag.executadoEm!).toLocaleString('pt-BR')}</p>}
+                                                    {ag.status === 'erro' && <p className="text-xs text-red-700 dark:text-red-400 mt-2">Erro: {ag.log}</p>}
+                                                </div>
+                                            );
+                                        })}
+                                     </div>
+                                </div>
+                            </div>
+                            <LogViewer logs={logs} title="Logs Gerais e de Agendamento" />
                         </div>
                     )}
                     
                     {/* ABA CERTIFICADOS */}
-                    {aba === 'certificados' && (
-                        <div className="space-y-6 animate-fade-in">
-                            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                                <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><FileKey className="w-5 h-5" />Upload de Certificados Digitais</h3>
-                                <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-8 text-center hover:border-blue-500 dark:hover:border-blue-400 transition">
-                                    <input type="file" accept=".pfx,.p12,.pem" onChange={handleCertUpload} className="hidden" id="cert-upload" disabled={uploadingCert} />
-                                    <label htmlFor="cert-upload" className={`inline-flex items-center gap-2 px-6 py-3 rounded-lg font-semibold cursor-pointer transition-colors ${uploadingCert ? 'bg-gray-400 text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
-                                        {uploadingCert ? <><Loader2 className="w-5 h-5 animate-spin" />Carregando...</> : <><Upload className="w-5 h-5" />Selecionar Certificado (.pfx, .p12)</>}
-                                    </label>
+                    {aba === 'certificados' && (() => {
+                        const certsFiltrados = certificados.filter(c => 
+                            c.nome.toLowerCase().includes(certBusca.toLowerCase()) || 
+                            c.cnpj.toLowerCase().includes(certBusca.toLowerCase())
+                        );
+                        return (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
+                                <div className="space-y-6"> {/* Left Column */}
+                                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                                        <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><FileKey className="w-5 h-5" />Upload de Certificados Digitais</h3>
+                                        <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-8 text-center hover:border-blue-500 dark:hover:border-blue-400 transition">
+                                            <input type="file" accept=".pfx,.p12,.pem" onChange={handleCertUpload} className="hidden" id="cert-upload" disabled={uploadingCert} />
+                                            <label htmlFor="cert-upload" className={`inline-flex items-center gap-2 px-6 py-3 rounded-lg font-semibold cursor-pointer transition-colors ${uploadingCert ? 'bg-gray-400 text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                                                {uploadingCert ? <><Loader2 className="w-5 h-5 animate-spin" />Carregando...</> : <><Upload className="w-5 h-5" />Selecionar Certificado (.pfx, .p12)</>}
+                                            </label>
+                                        </div>
+                                    </div>
+                                    {certificados.length > 0 && (
+                                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                                            <div className="flex justify-between items-center mb-4">
+                                                <h3 className="font-bold text-lg">Certificados Carregados ({certsFiltrados.length}/{certificados.length})</h3>
+                                                <div className="relative">
+                                                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                                                    <input 
+                                                        type="text" 
+                                                        placeholder="Buscar por nome ou CNPJ..." 
+                                                        value={certBusca} 
+                                                        onChange={e => setCertBusca(e.target.value)} 
+                                                        className="w-full pl-10 p-2 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2">
+                                                {certsFiltrados.length > 0 ? certsFiltrados.map(cert => {
+                                                    const isRealValidationDisabled = gcpConfig.configured && !gcpConfig.connectionVerified;
+                                                    return (
+                                                    <div key={cert.id} className={`border-2 rounded-lg p-4 transition-colors ${cert.status === 'válido' ? 'border-green-300 bg-green-50 dark:border-green-700 dark:bg-green-900/50' : cert.status === 'inválido' ? 'border-red-300 bg-red-50 dark:border-red-700 dark:bg-red-900/50' : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-700/50'}`}>
+                                                        <div className="flex justify-between items-start mb-4">
+                                                            <div className="flex items-center gap-3">
+                                                                <FileKey className={`w-8 h-8 ${cert.status === 'válido' ? 'text-green-600' : cert.status === 'inválido' ? 'text-red-600' : 'text-gray-600 dark:text-gray-400'}`} />
+                                                                <div>
+                                                                    <p className="font-semibold">{cert.nome}</p>
+                                                                    <p className="text-sm text-gray-500 dark:text-gray-400">{cert.tipo} • {cert.tamanho}</p>
+                                                                </div>
+                                                            </div>
+                                                            <span className={`px-3 py-1 rounded-full text-xs font-semibold ${cert.status === 'válido' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' : cert.status === 'inválido' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300'}`}>
+                                                            {cert.status.charAt(0).toUpperCase() + cert.status.slice(1)}
+                                                            </span>
+                                                        </div>
+                                                        {!cert.validado && (
+                                                            <div className="space-y-3">
+                                                                <div className="relative">
+                                                                    <input type={visiblePasswords[cert.id] ? "text" : "password"} value={cert.senha} onChange={e => setCertificados(p => p.map(c => c.id === cert.id ? { ...c, senha: e.target.value } : c))} placeholder="Senha do certificado" className="w-full p-2 pr-10 border rounded-lg bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
+                                                                    <button onClick={() => togglePasswordVisibility(cert.id)} className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                                                                        {visiblePasswords[cert.id] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                                                    </button>
+                                                                </div>
+                                                                <button 
+                                                                    onClick={() => validarCertificado(cert.id)} 
+                                                                    disabled={certValidando === cert.id || !cert.senha || isRealValidationDisabled} 
+                                                                    className="w-full py-2 rounded-lg font-semibold flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                                                                    title={isRealValidationDisabled ? "Teste a conexão com o backend primeiro na aba 'Conectar Backend'" : ""}
+                                                                >
+                                                                    {certValidando === cert.id ? <><Loader2 className="w-4 h-4 animate-spin" />Validando...</> : <><Shield className="w-4 h-4" />Validar Certificado</>}
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        {cert.validado && (
+                                                            <div className="grid grid-cols-2 gap-4 mt-4 p-3 bg-white dark:bg-gray-700 rounded-lg text-sm">
+                                                                <div><p className="text-xs text-gray-500 dark:text-gray-400">CNPJ</p><p className="font-semibold font-mono">{cert.cnpj}</p></div>
+                                                                <div><p className="text-xs text-gray-500 dark:text-gray-400">Razão Social</p><p className="font-semibold">{cert.razaoSocial}</p></div>
+                                                                <div><p className="text-xs text-gray-500 dark:text-gray-400">Validade</p><p className="font-semibold">{cert.validade}</p></div>
+                                                                <div><p className="text-xs text-gray-500 dark:text-gray-400">Status</p><p className="font-semibold text-green-600 dark:text-green-400">Pronto para uso</p></div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}) : <p className="text-gray-500 dark:text-gray-400 text-center py-4">Nenhum certificado encontrado para a busca.</p>}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                <div> {/* Right Column */}
+                                    <LogViewer logs={logs} title="Logs de Validação" />
                                 </div>
                             </div>
-                            {certificados.length > 0 && (
-                                <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                                     <h3 className="font-bold text-lg mb-4">Certificados Carregados ({certificados.length})</h3>
-                                     <div className="space-y-4">
-                                        {certificados.map(cert => (
-                                            <div key={cert.id} className={`border-2 rounded-lg p-4 transition-colors ${cert.status === 'válido' ? 'border-green-300 bg-green-50 dark:border-green-700 dark:bg-green-900/50' : cert.status === 'inválido' ? 'border-red-300 bg-red-50 dark:border-red-700 dark:bg-red-900/50' : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-700/50'}`}>
-                                                <div className="flex justify-between items-start mb-4">
-                                                    <div className="flex items-center gap-3">
-                                                        <FileKey className={`w-8 h-8 ${cert.status === 'válido' ? 'text-green-600' : cert.status === 'inválido' ? 'text-red-600' : 'text-gray-600 dark:text-gray-400'}`} />
-                                                        <div>
-                                                            <p className="font-semibold">{cert.nome}</p>
-                                                            <p className="text-sm text-gray-500 dark:text-gray-400">{cert.tipo} • {cert.tamanho}</p>
-                                                        </div>
-                                                    </div>
-                                                     <span className={`px-3 py-1 rounded-full text-xs font-semibold ${cert.status === 'válido' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' : cert.status === 'inválido' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300'}`}>
-                                                      {cert.status.charAt(0).toUpperCase() + cert.status.slice(1)}
-                                                    </span>
-                                                </div>
-                                                {!cert.validado && (
-                                                    <div className="space-y-3">
-                                                        <div className="relative">
-                                                            <input type={visiblePasswords[cert.id] ? "text" : "password"} value={cert.senha} onChange={e => setCertificados(p => p.map(c => c.id === cert.id ? { ...c, senha: e.target.value } : c))} placeholder="Senha do certificado" className="w-full p-2 pr-10 border rounded-lg bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
-                                                            <button onClick={() => togglePasswordVisibility(cert.id)} className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
-                                                                {visiblePasswords[cert.id] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                                            </button>
-                                                        </div>
-                                                        <button onClick={() => validarCertificado(cert.id)} disabled={certValidando === cert.id || !cert.senha} className="w-full py-2 rounded-lg font-semibold flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 transition-colors">
-                                                            {certValidando === cert.id ? <><Loader2 className="w-4 h-4 animate-spin" />Validando...</> : <><Shield className="w-4 h-4" />Validar Certificado</>}
-                                                        </button>
-                                                    </div>
-                                                )}
-                                                {cert.validado && (
-                                                     <div className="grid grid-cols-2 gap-4 mt-4 p-3 bg-white dark:bg-gray-700 rounded-lg text-sm">
-                                                        <div><p className="text-xs text-gray-500 dark:text-gray-400">CNPJ</p><p className="font-semibold font-mono">{cert.cnpj}</p></div>
-                                                        <div><p className="text-xs text-gray-500 dark:text-gray-400">Razão Social</p><p className="font-semibold">{cert.razaoSocial}</p></div>
-                                                        <div><p className="text-xs text-gray-500 dark:text-gray-400">Validade</p><p className="font-semibold">{cert.validade}</p></div>
-                                                        <div><p className="text-xs text-gray-500 dark:text-gray-400">Status</p><p className="font-semibold text-green-600 dark:text-green-400">Pronto para uso</p></div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
-                                     </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
+                        );
+                    })()}
 
                     {/* ABA CLIENTES */}
                     {aba === 'clientes' && (() => {
@@ -764,9 +1145,12 @@ Seja direto e profissional.`;
                                                 } else if (alertCount <= 5) {
                                                     alertColor = 'bg-yellow-500';
                                                     alertTooltip = `Status: Atenção (${alertCount} alerta${alertCount > 1 ? 's' : ''})`;
-                                                } else {
+                                                } else if (alertCount <= 10) {
                                                     alertColor = 'bg-red-500';
                                                     alertTooltip = `Status: Crítico (${alertCount} alerta${alertCount > 1 ? 's' : ''})`;
+                                                } else {
+                                                    alertColor = 'bg-red-900';
+                                                    alertTooltip = `Status: Muito Crítico (${alertCount} alertas)`;
                                                 }
                                             }
 
@@ -784,7 +1168,24 @@ Seja direto e profissional.`;
                                                     </div>
                                                     <div className="space-y-2">
                                                         <input placeholder="Nome da Empresa *" value={c.nome} onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, nome: e.target.value } : x))} className="w-full p-2 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" disabled={!c.ativo} />
-                                                        <input placeholder="CNPJ *" value={c.cnpj} onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, cnpj: e.target.value } : x))} className="w-full p-2 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" disabled={!c.ativo} />
+                                                        <div className="relative">
+                                                            <input 
+                                                                placeholder="CNPJ *" 
+                                                                value={c.cnpj} 
+                                                                onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, cnpj: applyCnpjMask(e.target.value) } : x))} 
+                                                                className="w-full p-2 pr-10 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" 
+                                                                disabled={!c.ativo}
+                                                                maxLength={18}
+                                                            />
+                                                            <button 
+                                                                type="button"
+                                                                onClick={() => copyToClipboard(c.cnpj)}
+                                                                className="absolute inset-y-0 right-0 px-3 flex items-center text-gray-400 hover:text-blue-500 transition-colors"
+                                                                title="Copiar CNPJ"
+                                                            >
+                                                                <ClipboardCopy className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
                                                         <input placeholder="Inscrição Municipal (SP) *" value={c.im} onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, im: e.target.value } : x))} className="w-full p-2 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" disabled={!c.ativo} />
                                                         <select value={c.certificadoId} onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, certificadoId: e.target.value } : x))} className="w-full p-2 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" disabled={!c.ativo || certificados.filter(cert => cert.validado).length === 0}>
                                                             <option value="">{certificados.filter(cert => cert.validado).length > 0 ? 'Selecionar Certificado Válido...' : 'Nenhum certificado válido'}</option>
@@ -801,19 +1202,7 @@ Seja direto e profissional.`;
                                         {processando ? <><Loader2 className="w-5 h-5 animate-spin" />Processando...</> : '🚀 Consultar NFP dos Clientes Ativos'}
                                     </button>
                                 </div>
-                                <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-                                    <h2 className="font-bold mb-4 flex items-center gap-2 text-lg"><FileText className="w-5 h-5" />Logs de Processamento</h2>
-                                    <div className="bg-gray-900 rounded p-3 h-[calc(100%-40px)] overflow-y-auto text-xs font-mono">
-                                        {logs.map(l => (
-                                            <div key={l.id} className="flex items-start gap-2 mb-1">
-                                                <Icon tipo={l.tipo} />
-                                                <span className="text-gray-400">{l.time}</span>
-                                                <span className={`break-all ${l.tipo === 'error' ? 'text-red-400' : l.tipo === 'success' ? 'text-green-400' : l.tipo === 'warning' ? 'text-yellow-400' : 'text-gray-300'}`}>{l.msg}</span>
-                                            </div>
-                                        ))}
-                                        {logs.length === 0 && <p className="text-gray-500">Aguardando processamento...</p>}
-                                    </div>
-                                </div>
+                               <LogViewer logs={logs} />
                             </div>
                         );
                     })()}
@@ -953,11 +1342,11 @@ Seja direto e profissional.`;
                                                 <span className="font-semibold">{h.data} <span className="text-xs text-gray-500 dark:text-gray-400 font-normal ml-2">(Período: {h.resultados[0]?.periodo})</span></span>
                                                 <span className="text-sm text-gray-600 dark:text-gray-400">{h.qt} cliente(s) processado(s)</span>
                                             </div>
-                                            <div className="text-sm text-gray-500 dark:text-gray-400 mt-2 grid grid-cols-2 gap-x-4">
+                                            <div className="text-sm text-gray-500 dark:text-gray-400 mt-2 grid grid-cols-2 md:grid-cols-4 gap-x-4">
                                                 <span>Notas Prestadas: <strong>{h.resultados.reduce((s, r) => s + (r.prestados?.notas || 0), 0).toLocaleString('pt-BR')}</strong></span>
                                                 <span>Créditos Gerados: <strong>R$ {h.resultados.reduce((s, r) => s + parseFloat(r.prestados?.creditos || '0'), 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</strong></span>
                                                 <span>Notas Tomadas: <strong>{h.resultados.reduce((s, r) => s + (r.tomados?.notas || 0), 0).toLocaleString('pt-BR')}</strong></span>
-                                                <span>Valor Tomado: <strong>R$ {h.resultados.reduce((s, r) => s + parseFloat(r.tomados?.valor || '0'), 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</strong></span>
+                                                <span>Alertas Prestados: <strong className="text-red-600 dark:text-red-400">{h.resultados.reduce((s, r) => s + (r.prestados?.semTomador || 0), 0)}</strong></span>
                                             </div>
                                         </div>
                                     ))}
@@ -967,142 +1356,244 @@ Seja direto e profissional.`;
                     )}
 
                     {/* ABA ALERTAS */}
-                    {aba === 'alertas' && (() => {
-                        const clientsWithAlerts = resultados.filter(r => (r.prestados.semTomador || 0) > 0);
-                        return (
-                            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
-                                <div className="flex justify-between items-center mb-6">
-                                    <h3 className="font-bold text-lg flex items-center gap-2"><Bell className="w-5 h-5" />Alertas Fiscais</h3>
-                                    {clientsWithAlerts.length > 0 && (
-                                        <button onClick={generateAlertReport} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-2 font-semibold transition-colors text-sm">
-                                            <FileText className="w-4 h-4" />Gerar Relatório Resumido
-                                        </button>
-                                    )}
-                                </div>
-                                {clientsWithAlerts.length === 0 ? (
-                                    <div className="text-center py-12">
-                                        <CheckCircle className="w-16 h-16 mx-auto text-green-500 mb-4" />
-                                        <h4 className="text-xl font-semibold text-gray-800 dark:text-gray-200">Tudo em Ordem!</h4>
-                                        <p className="text-gray-500 dark:text-gray-400 mt-2">Nenhum alerta fiscal foi identificado no último processamento.</p>
-                                    </div>
-                                ) : (
-                                    <div className="space-y-4">
-                                        {clientsWithAlerts.map(r => (
-                                            <div key={r.cnpj} className="border dark:border-gray-700 rounded-lg overflow-hidden">
-                                                <button onClick={() => toggleAlertExpansion(r.cnpj)} className="w-full flex justify-between items-center p-4 bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-left">
-                                                    <div>
-                                                        <p className="font-semibold text-gray-800 dark:text-gray-200">{r.cliente}</p>
-                                                        <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">{r.cnpj}</p>
-                                                    </div>
-                                                    <div className="flex items-center gap-4">
-                                                        <span className="px-3 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300 rounded-full text-xs font-bold">{r.prestados.semTomador} {r.prestados.semTomador === 1 ? 'Alerta' : 'Alertas'}</span>
-                                                        <ChevronDown className={`w-5 h-5 text-gray-500 transition-transform ${expandedAlerts.includes(r.cnpj) ? 'rotate-180' : ''}`} />
-                                                    </div>
-                                                </button>
-                                                {expandedAlerts.includes(r.cnpj) && (
-                                                    <div className="p-4 bg-white dark:bg-gray-800 border-t dark:border-gray-700 animate-fade-in">
-                                                        <h5 className="font-semibold mb-3 text-gray-700 dark:text-gray-300">Notas com Pendências:</h5>
-                                                        <ul className="space-y-2 text-sm text-gray-600 dark:text-gray-300">
-                                                            {Array.from({ length: r.prestados.semTomador || 0 }).map((_, i) => {
-                                                                const nfNumber = parseInt(r.cnpj.slice(0, 6).replace(/\D/g, '')) + i + 1;
-                                                                return (
-                                                                <li key={i} className="flex justify-between items-center py-2 border-b dark:border-gray-700 last:border-b-0">
-                                                                    <div>
-                                                                        <span className="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-xs">NF #{nfNumber}</span>
-                                                                        <p className="text-red-500 text-xs mt-1 font-medium">Motivo: Sem CPF/CNPJ do tomador.</p>
-                                                                    </div>
-                                                                    <a 
-                                                                        href={`https://nfe.prefeitura.sp.gov.br/contribuinte/notasedicao.aspx?nf=${nfNumber}`}
-                                                                        target="_blank" 
-                                                                        rel="noopener noreferrer"
-                                                                        className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-full text-xs font-semibold hover:bg-blue-200 dark:hover:bg-blue-800 transition-colors"
-                                                                    >
-                                                                        Corrigir no Portal
-                                                                        <ExternalLink className="w-3 h-3" />
-                                                                    </a>
-                                                                </li>
-                                                                )
-                                                            })}
-                                                        </ul>
-                                                    </div>
-                                                )}
+                    {aba === 'alertas' && (
+                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="font-bold text-lg flex items-center gap-2"><Bell className="w-5 h-5" />Painel de Alertas Fiscais</h3>
+                                <button onClick={generateAlertReport} className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-2 font-semibold transition-colors text-sm disabled:opacity-50" disabled={resultados.filter(r => (r.prestados.semTomador || 0) > 0).length === 0}>
+                                    <FileText className="w-4 h-4" />Gerar Relatório
+                                </button>
+                            </div>
+                            <div className="space-y-4">
+                                {resultados.filter(r => (r.prestados.semTomador || 0) > 0).length > 0 ? (
+                                    resultados.filter(r => (r.prestados.semTomador || 0) > 0).map(r => (
+                                        <div key={r.cnpj} className="border-l-4 border-red-500 bg-red-50 dark:bg-red-900/50 p-4 rounded-r-lg">
+                                            <div className="flex justify-between items-center cursor-pointer" onClick={() => toggleAlertExpansion(r.cnpj)}>
+                                                <div>
+                                                    <h4 className="font-bold text-red-800 dark:text-red-300">{r.cliente}</h4>
+                                                    <p className="text-sm text-red-600 dark:text-red-400">{r.prestados.semTomador} nota(s) sem tomador</p>
+                                                </div>
+                                                <ChevronDown className={`w-5 h-5 text-red-600 dark:text-red-400 transition-transform ${expandedAlerts.includes(r.cnpj) ? 'rotate-180' : ''}`} />
                                             </div>
-                                        ))}
+                                            {expandedAlerts.includes(r.cnpj) && (
+                                                <div className="mt-4 pt-4 border-t border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+                                                    <p><strong>CNPJ:</strong> {r.cnpj}</p>
+                                                    <p><strong>Ação Imediata:</strong> É necessário acessar o portal da Nota Fiscal Paulistana e corrigir as {r.prestados.semTomador} notas emitidas, adicionando o CPF/CNPJ do tomador do serviço para evitar problemas fiscais.</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))
+                                ) : (
+                                    <div className="text-center py-8">
+                                        <CheckCircle className="w-12 h-12 mx-auto text-green-500 mb-4" />
+                                        <p className="font-semibold text-lg text-gray-700 dark:text-gray-300">Nenhum alerta fiscal encontrado!</p>
+                                        <p className="text-gray-500 dark:text-gray-400">Todos os clientes processados estão em conformidade.</p>
                                     </div>
                                 )}
                             </div>
-                        )
-                    })()}
+                        </div>
+                    )}
+                    
+                    {/* ABA CÓDIGO */}
+                    {aba === 'codigo' && (
+                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
+                            <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Code className="w-5 h-5" />Código do Backend para Google Cloud Functions</h3>
+                            <div className="bg-yellow-50 dark:bg-yellow-900/50 border-l-4 border-yellow-400 p-4 rounded-r-lg mb-6">
+                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Instruções de Deploy</h4>
+                                <div className="text-sm text-yellow-700 dark:text-yellow-400 space-y-3 mt-2">
+                                    <p>
+                                        Crie um diretório, salve os dois arquivos (`index.js`, `package.json`) dentro dele e faça o deploy de cada uma das 3 funções (`validarCertificado`, `consultarNFP`, `healthCheck`) para o Google Cloud Functions.
+                                    </p>
+                                    <p>
+                                        <strong>CORS:</strong> O código de exemplo já inclui a configuração de CORS, que é essencial para a comunicação entre este app e seu backend.
+                                    </p>
+                                    <div className="bg-red-50 dark:bg-red-900/50 border border-red-200 dark:border-red-600 p-3 rounded-md">
+                                        <p className="font-bold text-red-800 dark:text-red-300 flex items-center gap-2">
+                                            <AlertCircle className="w-5 h-5"/> Ação Crítica para Evitar Erros de Conexão
+                                        </p>
+                                        <p className="mt-1 text-red-700 dark:text-red-400">
+                                            Para que a conexão funcione, você <strong>DEVE</strong> configurar cada função para <strong>"Permitir invocações não autenticadas"</strong> (Allow unauthenticated invocations) durante o processo de deploy. Isso torna a função pública e acessível pela internet, resolvendo a maioria dos erros "Failed to fetch".
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <h4 className="font-semibold mb-2">Arquivo `index.js` (Lógica das Funções)</h4>
+                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto"><code>{
+`const functions = require('@google-cloud/functions-framework');
+const cors = require('cors')({ origin: true });
 
-                    {/* MODAL HISTÓRICO */}
-                    {selectedHistoryItem && (
-                         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 animate-fade-in" onClick={() => setSelectedHistoryItem(null)}>
-                            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-5xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                                <h3 className="font-bold text-lg mb-4">Detalhes da Consulta de {selectedHistoryItem.data} (Período: {selectedHistoryItem.resultados[0]?.periodo})</h3>
-                                 <div className="overflow-x-auto">
-                                    <table className="w-full min-w-[800px] text-sm">
-                                        <thead className="border-b-2 dark:border-b-gray-700">
-                                            <tr>
-                                                <th rowSpan={2} className="p-3 text-left font-semibold text-gray-600 dark:text-gray-400 align-bottom">Empresa</th>
-                                                <th colSpan={4} className="p-3 text-center font-semibold text-gray-600 dark:text-gray-400 border-b dark:border-gray-700 border-l dark:border-l-gray-600">Serviços Prestados</th>
-                                                <th colSpan={2} className="p-3 text-center font-semibold text-gray-600 dark:text-gray-400 border-b dark:border-gray-700 border-l dark:border-l-gray-600">Serviços Tomados</th>
-                                            </tr>
-                                            <tr>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400 border-l dark:border-l-gray-600">Notas</th>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400">Valor</th>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400">Créditos</th>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400">Status</th>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400 border-l dark:border-l-gray-600">Notas</th>
-                                                <th className="p-2 text-left font-semibold text-gray-500 dark:text-gray-400">Valor</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y dark:divide-gray-700">
-                                            {selectedHistoryItem.resultados.map((r, i) => (
-                                                <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                                                    <td className="p-3"><div className="font-medium">{r.cliente}</div><div className="text-xs text-gray-500 dark:text-gray-400 font-mono">{r.cnpj}</div></td>
-                                                    <td className="p-2 border-l dark:border-l-gray-600 font-mono text-center">{r.prestados.notas}</td>
-                                                    <td className="p-2 font-mono">R$ {parseFloat(r.prestados.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                                    <td className="p-2 font-mono text-green-600 dark:text-green-400 font-semibold">R$ {parseFloat(r.prestados.creditos).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                                    <td className="p-2">{(r.prestados.semTomador || 0) > 0 ? <span className="px-2 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300 rounded-full text-xs font-semibold">{r.prestados.semTomador} alerta(s)</span> : <span className="px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300 rounded-full text-xs font-semibold">OK</span>}</td>
-                                                    <td className="p-2 border-l dark:border-l-gray-600 font-mono text-center">{r.tomados.notas}</td>
-                                                    <td className="p-2 font-mono">R$ {parseFloat(r.tomados.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                 </div>
-                                <button onClick={() => setSelectedHistoryItem(null)} className="mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Fechar</button>
+/**
+ * Função para validar certificados digitais (simulada).
+ * Recebe: { certificateBase64, password }
+ * Retorna: { cnpj, razaoSocial, validade }
+ */
+functions.http('validarCertificado', (req, res) => {
+  cors(req, res, () => {
+    // TODO: Implemente sua lógica de validação de certificado aqui.
+    // Exemplo: usar node-forge ou similar para abrir o PFX/P12.
+    
+    // Resposta de sucesso simulada (substitua com dados reais da validação)
+    console.log('Recebido para validação:', req.body.password ? 'Senha OK' : 'Sem Senha');
+    res.status(200).json({
+      cnpj: '00.111.222/0001-33',
+      razaoSocial: 'EMPRESA VALIDADA VIA CLOUD LTDA',
+      validade: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString()
+    });
+    
+    // Exemplo de resposta de erro:
+    // res.status(400).send('Senha inválida ou certificado corrompido.');
+  });
+});
+
+/**
+ * Função para consultar o portal da NFP (simulada).
+ * Recebe: { cnpj, im, periodo, certificateBase64, password }
+ * Retorna: { prestados: ServiceData, tomados: ServiceData, status: 'sucesso' }
+ */
+functions.http('consultarNFP', (req, res) => {
+  cors(req, res, () => {
+    // TODO: Implemente sua lógica de automação/consulta no portal da NFP.
+    // (Pode usar bibliotecas como Puppeteer, Playwright, etc.)
+    console.log('Consultando NFP para:', req.body.cnpj);
+
+    const generateServiceData = () => ({
+      notas: Math.floor(Math.random() * 50) + 10,
+      valor: (Math.random() * 100000 + 10000).toFixed(2),
+      iss: (Math.random() * 5000).toFixed(2),
+      creditos: (Math.random() * 1500).toFixed(2),
+      semTomador: Math.floor(Math.random() * 5)
+    });
+
+    res.status(200).json({
+      prestados: generateServiceData(),
+      tomados: generateServiceData(),
+      status: 'sucesso'
+    });
+  });
+});
+
+/**
+ * Função de Health Check para teste de conexão.
+ */
+functions.http('healthCheck', (req, res) => {
+    cors(req, res, () => {
+        res.status(200).send('OK');
+    });
+});`
+                                    }</code></pre>
+                                </div>
+                                <div>
+                                    <h4 className="font-semibold mb-2">Arquivo `package.json` (Dependências)</h4>
+                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto"><code>{
+`{
+  "name": "nfp-pro-cloud-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.0.0",
+    "cors": "^2.8.5"
+  }
+}`
+                                    }</code></pre>
+                                </div>
                             </div>
                         </div>
                     )}
-
-                    {/* MODAL RELATÓRIO DE ALERTAS */}
-                    {reportModal.isOpen && (
-                        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50 animate-fade-in" onClick={() => setReportModal({ ...reportModal, isOpen: false })}>
-                            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
-                                <h3 className="font-bold text-lg mb-4">Relatório de Alertas</h3>
-                                <div className="flex-grow overflow-y-auto bg-gray-50 dark:bg-gray-900 rounded p-4 prose dark:prose-invert prose-sm max-w-none">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{reportModal.content}</ReactMarkdown>
-                                </div>
-                                <div className="mt-6 flex justify-end gap-4">
-                                    <button 
-                                        onClick={() => {
-                                            navigator.clipboard.writeText(reportModal.content);
-                                            addLog('📋 Relatório copiado para a área de transferência!', 'success');
-                                        }} 
-                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold transition-colors"
-                                    >
-                                        Copiar Texto
-                                    </button>
-                                    <button onClick={() => setReportModal({ ...reportModal, isOpen: false })} className="px-4 py-2 bg-gray-200 text-gray-800 dark:bg-gray-600 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 font-semibold transition-colors">
-                                        Fechar
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
                 </main>
+                
+                {/* MODALS */}
+                {selectedHistoryItem && (
+                     <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setSelectedHistoryItem(null)}>
+                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                            <div className="p-6 border-b dark:border-gray-700">
+                                <h3 className="font-bold text-lg">Detalhes do Processamento</h3>
+                                <p className="text-sm text-gray-500 dark:text-gray-400">Data: {selectedHistoryItem.data} • {selectedHistoryItem.qt} clientes</p>
+                            </div>
+                            <div className="p-6">
+                               <table className="w-full text-sm">
+                                    <thead>
+                                        <tr className="border-b dark:border-gray-700">
+                                            <th className="p-2 text-left font-semibold">Cliente</th>
+                                            <th className="p-2 text-left font-semibold">Notas Prest.</th>
+                                            <th className="p-2 text-left font-semibold">Créditos Prest.</th>
+                                            <th className="p-2 text-left font-semibold">Alertas Prest.</th>
+                                            <th className="p-2 text-left font-semibold">Notas Tom.</th>
+                                            <th className="p-2 text-left font-semibold">Fonte</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y dark:divide-gray-700">
+                                        {selectedHistoryItem.resultados.map((r, i) => (
+                                            <tr key={i}>
+                                                <td className="p-2 font-medium">{r.cliente}</td>
+                                                <td className="p-2">{r.prestados.notas}</td>
+                                                <td className="p-2 text-green-600 dark:text-green-400">R$ {parseFloat(r.prestados.creditos).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td>
+                                                <td className="p-2 text-red-600 dark:text-red-400 font-bold">{r.prestados.semTomador || 0}</td>
+                                                <td className="p-2">{r.tomados.notas}</td>
+                                                <td className="p-2"><span className={`px-2 py-1 text-xs rounded-full ${r.fonte === 'GOOGLE_CLOUD' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300' : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300'}`}>{r.fonte}</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                               </table>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                
+                {reportModal.isOpen && (
+                     <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setReportModal({ isOpen: false, content: '' })}>
+                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                            <div className="p-6">
+                                <ReactMarkdown className="prose dark:prose-invert max-w-none">{reportModal.content}</ReactMarkdown>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {helpModalOpen && (
+                    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setHelpModalOpen(false)}>
+                        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl" onClick={e => e.stopPropagation()}>
+                            <div className="p-6 border-b dark:border-gray-700">
+                                <h3 className="font-bold text-lg flex items-center gap-2"><HelpCircle className="w-5 h-5 text-blue-500" />Guia Rápido: Como Usar o NFP Pro Cloud</h3>
+                            </div>
+                            <div className="p-6 space-y-4 text-gray-700 dark:text-gray-300">
+                                <p>Este assistente foi projetado para simplificar sua rotina fiscal. Siga os passos abaixo:</p>
+                                <div className="space-y-3">
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">1</div>
+                                        <div>
+                                            <h4 className="font-semibold">Carregue os Certificados</h4>
+                                            <p className="text-sm">Na aba <strong>"1. Certificados"</strong>, faça o upload dos arquivos (.pfx, .p12) de seus clientes, insira a senha e valide-os. A validação pode ser simulada (para testes) ou real (se o backend estiver conectado).</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">2</div>
+                                        <div>
+                                            <h4 className="font-semibold">Cadastre os Clientes</h4>
+                                            <p className="text-sm">Vá para <strong>"2. Clientes"</strong>, adicione as empresas, preencha os dados (CNPJ, Inscrição Municipal) e associe cada uma a um certificado já validado.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">3</div>
+                                        <div>
+                                            <h4 className="font-semibold">(Opcional) Conecte seu Backend</h4>
+                                            <p className="text-sm">Para usar dados reais, siga as instruções na aba <strong>"3. Conectar Backend"</strong>. Você precisará fazer o deploy de um código no seu próprio Google Cloud e depois configurar a conexão aqui.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">4</div>
+                                        <div>
+                                            <h4 className="font-semibold">Processe e Analise</h4>
+                                            <p className="text-sm">De volta à aba <strong>"Clientes"</strong>, clique em <strong>"Consultar NFP"</strong>. O sistema buscará os dados (reais ou simulados) e os exibirá nas abas <strong>"Resultados"</strong>, <strong>"Gráficos"</strong> e <strong>"Alertas"</strong>, incluindo uma análise feita pela IA do Gemini.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
             </div>
         </div>
     );
