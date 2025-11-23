@@ -97,6 +97,7 @@ interface User {
     nome: string;
     email: string;
     senha?: string;
+    isAdmin?: boolean;
 }
 
 type Aba = 'conectar' | 'certificados' | 'clientes' | 'resultados' | 'graficos' | 'comparacao' | 'historico' | 'alertas' | 'codigo' | 'agendamento';
@@ -128,6 +129,19 @@ const LogViewer = ({ logs, title = "Logs de Processamento" }: { logs: Log[], tit
     );
 };
 
+// --- COMPONENTE DE LOADING DE AUTENTICAÇÃO ---
+const AuthLoadingIndicator = ({ message }: { message: string }) => (
+    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-white/90 dark:bg-gray-800/95 rounded-2xl backdrop-blur-sm transition-all duration-300">
+        <div className="relative">
+            <div className="w-16 h-16 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 text-blue-600 animate-pulse" />
+            </div>
+        </div>
+        <p className="mt-6 text-blue-600 dark:text-blue-400 font-bold text-lg animate-pulse tracking-wide">{message}</p>
+    </div>
+);
+
 
 // --- COMPONENTE PRINCIPAL DO APP ---
 export default function App() {
@@ -145,7 +159,7 @@ export default function App() {
     const [analiseIA, setAnaliseIA] = useState('');
     const [logs, setLogs] = useState<Log[]>([]);
     const [comparacao, setComparacao] = useState<ComparisonItem[]>([]);
-    const [filtros, setFiltros] = useState({ busca: '', status: 'todos' });
+    const [filtros, setFiltros] = useState({ busca: '', status: 'todos', periodo: '' });
     const [aba, setAba] = useState<Aba>('certificados');
     const [certificados, setCertificados] = useState<Certificate[]>([]);
     const [certBusca, setCertBusca] = useState('');
@@ -215,7 +229,8 @@ export default function App() {
             const savedUser = localStorage.getItem('nfp_active_user');
             const savedToken = localStorage.getItem('nfp_auth_token');
             if (savedUser && savedToken) {
-                setUser(JSON.parse(savedUser));
+                const parsedUser = JSON.parse(savedUser);
+                setUser(parsedUser);
                 setAuthToken(savedToken);
             }
 
@@ -270,24 +285,30 @@ export default function App() {
             return;
         }
 
+        // Validação Explícita do Administrador Master
+        const isMasterAdmin = emailInput === 'junior@spassessoriacontabil.com.br';
+
         setAuthLoading(true);
         // Simulate network delay for better UX and to show loading state
-        await new Promise(resolve => setTimeout(resolve, 800));
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
         try {
+            // Carrega usuários existentes com segurança
             let storedUsers: User[] = [];
             try {
                 const usersJson = localStorage.getItem('nfp_users');
                 if (usersJson) {
                     storedUsers = JSON.parse(usersJson);
+                    // Garante que é um array
                     if (!Array.isArray(storedUsers)) storedUsers = [];
                 }
             } catch (e) {
-                console.error("Erro ao carregar usuários", e);
+                console.error("Erro ao carregar banco de usuários local", e);
                 storedUsers = [];
             }
 
             if (authMode === 'register') {
+                // --- FLUXO DE CADASTRO ---
                 if (!nomeInput) {
                     alert('❌ Por favor, preencha seu nome.');
                     setAuthLoading(false);
@@ -298,62 +319,99 @@ export default function App() {
                     setAuthLoading(false);
                     return;
                 }
+
+                // VALIDAÇÃO DE SENHA FORTE
+                const hasUpperCase = /[A-Z]/.test(senhaInput);
+                const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>\-_]/.test(senhaInput);
                 
-                // Check existence (case insensitive)
+                if (!hasUpperCase || !hasSpecialChar) {
+                    alert('❌ Senha Fraca: A senha deve conter pelo menos uma letra MAIÚSCULA e um caractere especial (ex: @, #, $, -).');
+                    setAuthLoading(false);
+                    return;
+                }
+                
+                // Verifica se já existe
                 if (storedUsers.some((u: User) => u.email.toLowerCase() === emailInput)) {
-                    alert('❌ Usuário já cadastrado. Por favor, faça login.');
+                    alert(`⚠️ O email ${emailInput} já possui cadastro!\n\nRedirecionando para o login. Por favor, insira sua senha.`);
                     setAuthMode('login');
+                    setAuthData(prev => ({ ...prev, senha: '' })); // Limpa a senha para o usuário digitar
                     setAuthLoading(false);
                     return;
                 }
 
-                const newUser = { nome: nomeInput, email: emailInput, senha: senhaInput };
+                // Cria novo usuário
+                const newUser: User = { 
+                    nome: nomeInput, 
+                    email: emailInput, 
+                    senha: senhaInput,
+                    isAdmin: isMasterAdmin // Garante admin no cadastro
+                };
+
+                // SALVA NO ARRAY E PERSISTE NO LOCALSTORAGE
                 const updatedUsers = [...storedUsers, newUser];
                 localStorage.setItem('nfp_users', JSON.stringify(updatedUsers));
                 
-                // Auto login after register
+                // Auto login após cadastro
                 const token = btoa(`${emailInput}:${Date.now()}`); // Mock JWT
-                setUser({ nome: nomeInput, email: emailInput });
+                setUser(newUser);
                 setAuthToken(token);
-                localStorage.setItem('nfp_active_user', JSON.stringify({ nome: nomeInput, email: emailInput }));
+                
+                // Salva sessão ativa
+                localStorage.setItem('nfp_active_user', JSON.stringify(newUser));
                 localStorage.setItem('nfp_auth_token', token);
-                addLog(`✅ Cadastro realizado com sucesso! Bem-vindo, ${nomeInput}.`, 'success');
+                
+                addLog(`✅ Cadastro realizado e salvo com sucesso! Bem-vindo, ${nomeInput}.`, 'success');
 
             } else {
-                // Login logic
-                
-                // Backdoor for demo/admin
-                if (emailInput === 'admin@spassessoriacontabil.com.br' && senhaInput === 'admin123') {
-                     const adminUser = { nome: 'Administrador', email: emailInput };
-                     const token = btoa(`${emailInput}:${Date.now()}`);
-                     setUser(adminUser);
-                     setAuthToken(token);
-                     localStorage.setItem('nfp_active_user', JSON.stringify(adminUser));
-                     localStorage.setItem('nfp_auth_token', token);
-                     addLog('✅ Login administrativo realizado', 'success');
-                     return;
-                }
-
-                // Find user securely (case insensitive email, sensitive password)
-                const validUser = storedUsers.find((u: User) => 
+                // --- FLUXO DE LOGIN ---
+                // Busca usuário salvo (case insensitive para email)
+                let validUserIndex = storedUsers.findIndex((u: User) => 
                     u.email.toLowerCase() === emailInput && u.senha === senhaInput
                 );
+                
+                // Se encontrou, pega o objeto, senão null
+                let validUser = validUserIndex >= 0 ? storedUsers[validUserIndex] : null;
 
                 if (validUser) {
                     const token = btoa(`${validUser.email}:${Date.now()}`); // Mock JWT
-                    setUser({ nome: validUser.nome, email: validUser.email });
+                    
+                    // FORCE UPDATE: Se for o Master Admin e não estiver salvo como admin, corrige o banco local
+                    if (isMasterAdmin && !validUser.isAdmin) {
+                        validUser.isAdmin = true;
+                        // Atualiza no array e salva
+                        storedUsers[validUserIndex] = validUser;
+                        localStorage.setItem('nfp_users', JSON.stringify(storedUsers));
+                        addLog('👑 Privilégios de Administrador Master atualizados.', 'success');
+                    }
+
+                    // Atualiza flag de admin se necessário (para garantir retrocompatibilidade na sessão)
+                    const finalUserObj = { 
+                        ...validUser, 
+                        isAdmin: validUser.isAdmin || isMasterAdmin 
+                    };
+
+                    setUser(finalUserObj);
                     setAuthToken(token);
-                    localStorage.setItem('nfp_active_user', JSON.stringify({ nome: validUser.nome, email: validUser.email }));
+                    
+                    // Salva sessão ativa
+                    localStorage.setItem('nfp_active_user', JSON.stringify(finalUserObj));
                     localStorage.setItem('nfp_auth_token', token);
                     addLog(`✅ Login realizado. Bem-vindo de volta, ${validUser.nome}.`, 'success');
                 } else {
-                    alert('❌ Credenciais inválidas. Verifique e-mail e senha.');
-                    setAuthData(prev => ({ ...prev, senha: '' })); // Clear password on failure
+                    // Verifica se o email existe mas a senha está errada
+                    const emailExists = storedUsers.some(u => u.email.toLowerCase() === emailInput);
+                    
+                    if (emailExists) {
+                        alert('❌ Senha incorreta. Tente novamente.');
+                        setAuthData(prev => ({ ...prev, senha: '' }));
+                    } else {
+                        alert('❌ Usuário não encontrado.\n\nSe este é seu primeiro acesso, clique em "Primeiro acesso? Cadastre-se" abaixo do botão.');
+                    }
                 }
             }
         } catch (error) {
             console.error("Auth Error:", error);
-            alert("Erro inesperado durante a autenticação.");
+            alert("Erro inesperado durante a autenticação. Tente recarregar a página.");
         } finally {
             setAuthLoading(false);
         }
@@ -364,6 +422,7 @@ export default function App() {
         setAuthToken(null);
         localStorage.removeItem('nfp_active_user');
         localStorage.removeItem('nfp_auth_token');
+        setAuthMode('login'); // Reseta para login ao sair
         setAuthData({ nome: '', email: '', senha: '' });
         addLog('👋 Logout realizado.', 'info');
     };
@@ -495,7 +554,9 @@ export default function App() {
         
         if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
             alert('⛔ ERRO: Backend não conectado.\n\nEsta aplicação requer conexão real com o Google Cloud. Vá para a aba "Conectar Backend" e configure o projeto.');
-            setAba('conectar');
+            if (user?.isAdmin) {
+                setAba('conectar');
+            }
             return;
         }
 
@@ -550,7 +611,7 @@ export default function App() {
         const periodo = periodoOverride || `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`;
     
         if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
-             throw new Error("Backend desconectado. Configure a aba 'Conectar Backend'.");
+             throw new Error("Backend desconectado. O Administrador deve configurar a conexão.");
         }
         
         addLog(`☁️ Consultando NFP para ${cliente.nome} via Google Cloud no período ${periodo}...`, 'info');
@@ -661,7 +722,9 @@ Seja direto e profissional.`;
         
         if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
             alert('⛔ Backend não conectado. Conecte-se na aba "Conectar Backend" para processar dados reais.');
-            setAba('conectar');
+            if (user?.isAdmin) {
+                setAba('conectar');
+            }
             return;
         }
 
@@ -710,19 +773,55 @@ Seja direto e profissional.`;
         if (res.length > 0) setAba('resultados');
     };
 
-    const exportar = () => {
-        if (resultados.length === 0) return;
-        const header = 'Cliente;CNPJ;IM;Periodo;Notas Prestadas;Valor Prestado;Creditos Prestados;Alertas Prestados;Notas Tomadas;Valor Tomado\n';
-        const csv = header + resultados.map(r => 
-            `${r.cliente};${r.cnpj};${r.im};${r.periodo};` +
-            `${r.prestados.notas};R$ ${r.prestados.valor};R$ ${r.prestados.creditos};${r.prestados.semTomador || 0};` +
-            `${r.tomados.notas};R$ ${r.tomados.valor}`
+    // --- LÓGICA DE RENDERIZAÇÃO E FILTRAGEM ---
+    // Filtragem unificada (usada para exibição e exportação)
+    const filtrados = resultados.filter(r => {
+        const b = r.cliente.toLowerCase().includes(filtros.busca.toLowerCase());
+        const s = filtros.status === 'todos' || (filtros.status === 'alertas' ? (r.prestados.semTomador || 0) > 0 : (r.prestados.semTomador || 0) === 0);
+        const p = !filtros.periodo || r.periodo.includes(filtros.periodo);
+        return b && s && p;
+    });
+
+    const baixarNFP = () => {
+        if (filtrados.length === 0) {
+            alert("Nenhum dado filtrado disponível para exportação.");
+            return;
+        }
+        
+        // Definição do Cabeçalho conforme solicitado
+        const header = 'Cliente;CNPJ;IM;Periodo;Notas Prestadas;Valor Prestado;ISS Prestado;Creditos Prestados;Notas Tomadas;Valor Tomado\n';
+        
+        // Helper para formatar moeda para CSV (formato brasileiro R$ x.xxx,xx)
+        const fmtCurrency = (val: string | number) => {
+            const num = parseFloat(String(val));
+            return `"${num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}"`;
+        };
+
+        const csv = header + filtrados.map(r => 
+            [
+                r.cliente,
+                r.cnpj,
+                r.im,
+                r.periodo,
+                r.prestados.notas,
+                fmtCurrency(r.prestados.valor),
+                fmtCurrency(r.prestados.iss),
+                fmtCurrency(r.prestados.creditos),
+                r.tomados.notas,
+                fmtCurrency(r.tomados.valor)
+            ].join(';')
         ).join('\n');
+
+        // Criação do Blob e Download
+        const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
-        link.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv' }));
-        link.download = `nfp_export_${Date.now()}.csv`;
+        link.href = URL.createObjectURL(blob);
+        link.download = `NFP_Export_${new Date().toLocaleDateString('pt-BR').replace(/\//g, '-')}_${Date.now()}.csv`;
+        document.body.appendChild(link);
         link.click();
-        addLog('📥 CSV exportado', 'success');
+        document.body.removeChild(link);
+        
+        addLog('📥 Arquivo NFP (CSV) baixado com sucesso.', 'success');
     };
     
     const generateAlertReport = () => {
@@ -942,31 +1041,36 @@ functions.http('healthCheck', (req, res) => {
     }, [agendamentos, executarAgendamento]);
     
     // --- LÓGICA DE RENDERIZAÇÃO ---
-    const filtrados = resultados.filter(r => {
-        const b = r.cliente.toLowerCase().includes(filtros.busca.toLowerCase());
-        const s = filtros.status === 'todos' || (filtros.status === 'alertas' ? (r.prestados.semTomador || 0) > 0 : (r.prestados.semTomador || 0) === 0);
-        return b && s;
-    });
+    // Note: 'filtrados' logic was moved up before baixarNFP for shared access.
     
+    // DEFINIÇÃO DAS ABAS (FILTRADA POR PERMISSÃO DE ADMIN)
     const abas: { id: Aba; icon: React.ElementType; label: string; badge?: () => string | number | null }[] = [
         { id: 'certificados', icon: FileKey, label: '1. Certificados', badge: () => certificados.filter(c => c.validado).length || null },
         { id: 'clientes', icon: Users, label: '2. Clientes', badge: () => clientes.filter(c => c.ativo).length || null },
-        { id: 'conectar', icon: Cloud, label: '3. Conectar Backend', badge: () => gcpConfig.connectionVerified ? '✓' : '' },
+        // Apenas o ADMIN (junior@...) vê as abas de configuração e código
+        ...(user?.isAdmin ? [
+            { id: 'conectar', icon: Cloud, label: '3. Conectar Backend', badge: () => gcpConfig.connectionVerified ? '✓' : '' },
+            { id: 'codigo', icon: Code, label: 'Código' }
+        ] as const : []),
         { id: 'agendamento', icon: Clock, label: '4. Agendamento', badge: () => agendamentos.filter(a => a.status === 'agendado').length || null },
         { id: 'resultados', icon: TrendingUp, label: 'Resultados', badge: () => resultados.length || null },
         { id: 'graficos', icon: BarChart3, label: 'Gráficos' },
         { id: 'historico', icon: Calendar, label: 'Histórico', badge: () => historico.length || null },
         { id: 'alertas', icon: Bell, label: 'Alertas', badge: () => resultados.filter(r => (r.prestados.semTomador || 0) > 0).length || null },
-        { id: 'codigo', icon: Code, label: 'Código' }
     ];
 
     if (!user) return (
         <div className="min-h-screen bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-700 flex items-center justify-center p-6 dark">
-            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in relative"> {/* Added relative for loading overlay positioning */}
+                
+                {/* Loading Overlay Component */}
+                {authLoading && <AuthLoadingIndicator message={authMode === 'login' ? 'Acessando Portal...' : 'Validando Cadastro...'} />}
+
                 <div className="text-center mb-6">
                     <Cloud className="w-16 h-16 mx-auto text-blue-600 mb-4" />
                     <h1 className="text-3xl font-bold text-gray-800">NFP Pro Cloud</h1>
-                    <p className="text-gray-500 text-sm mt-2">Portal de Automação Contábil</p>
+                    <p className="text-gray-600 font-medium mt-2">Portal de Consulta Automatica para NFP</p>
+                    <p className="text-blue-600 text-sm font-bold mt-1 tracking-wide">Desenvolvido BY - SP Assessoria Contabil</p>
                 </div>
                 
                 <div className="space-y-4">
@@ -1017,6 +1121,9 @@ functions.http('healthCheck', (req, res) => {
                             />
                             <Lock className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
                         </div>
+                         {authMode === 'register' && (
+                            <p className="text-xs text-gray-500 mt-1">Mínimo: 1 Maiúscula, 1 Caractere Especial (@, #, etc.)</p>
+                        )}
                     </div>
 
                     <button 
@@ -1024,14 +1131,7 @@ functions.http('healthCheck', (req, res) => {
                         disabled={authLoading}
                         className={`w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2 ${authLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
                     >
-                        {authLoading ? (
-                            <>
-                                <Loader2 className="w-5 h-5 animate-spin" />
-                                {authMode === 'login' ? 'Entrando...' : 'Cadastrando...'}
-                            </>
-                        ) : (
-                            authMode === 'login' ? 'Entrar' : 'Cadastrar e Entrar'
-                        )}
+                        {authMode === 'login' ? 'Entrar' : 'Cadastrar e Entrar'}
                     </button>
                     
                     <div className="text-center mt-4">
@@ -1047,6 +1147,9 @@ functions.http('healthCheck', (req, res) => {
                         </button>
                     </div>
                 </div>
+                 <div className="mt-6 text-center border-t pt-4">
+                     <p className="text-xs text-gray-400">Uso Exclusivo e Direitos Reservados - SP Assessoria Contabil</p>
+                 </div>
             </div>
         </div>
     );
@@ -1065,14 +1168,18 @@ functions.http('healthCheck', (req, res) => {
                             <button onClick={() => setHelpModalOpen(true)} className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
                                 <HelpCircle className="w-5 h-5 text-gray-500" />
                             </button>
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-1 font-semibold hidden sm:block">
-                                SP Assessoria Contábil
-                            </p>
+                             <div className="hidden sm:block ml-1 mt-1">
+                                <p className="text-xs text-gray-500 dark:text-gray-400 font-semibold">Portal de Consulta Automatica para NFP</p>
+                                <p className="text-[10px] text-blue-600 dark:text-blue-400 font-bold">Desenvolvido BY - SP Assessoria Contabil</p>
+                            </div>
                         </div>
                         <div className="flex items-center gap-4">
-                             <span className="text-sm font-medium text-gray-600 dark:text-gray-300 hidden md:block">
-                                Olá, {user.nome}
-                             </span>
+                             <div className="text-right hidden md:block">
+                                 <div className="text-sm font-medium text-gray-600 dark:text-gray-300">
+                                    Olá, {user.nome}
+                                 </div>
+                                 {user.isAdmin && <div className="text-xs font-bold text-purple-600 dark:text-purple-400">Administrador Master</div>}
+                             </div>
                              <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
                                 {theme === 'light' ? <Moon className="w-5 h-5 text-gray-600" /> : <Sun className="w-5 h-5 text-yellow-400" />}
                             </button>
@@ -1507,6 +1614,14 @@ functions.http('healthCheck', (req, res) => {
                                             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                                             <input placeholder="Buscar por cliente..." value={filtros.busca} onChange={e => setFiltros({ ...filtros, busca: e.target.value })} className="w-full pl-10 p-2 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
                                         </div>
+                                        <div className="relative min-w-[150px]">
+                                            <input 
+                                                placeholder="Período (MM/AAAA)" 
+                                                value={filtros.periodo} 
+                                                onChange={e => setFiltros({ ...filtros, periodo: e.target.value })} 
+                                                className="w-full p-2 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" 
+                                            />
+                                        </div>
                                         <select value={filtros.status} onChange={e => setFiltros({ ...filtros, status: e.target.value })} className="p-2 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600">
                                             <option value="todos">Todos</option>
                                             <option value="ok">OK</option>
@@ -1514,8 +1629,8 @@ functions.http('healthCheck', (req, res) => {
                                         </select>
                                     </div>
                                     <div className="flex items-center gap-4">
-                                        <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">Período: <span className="font-bold text-blue-600 dark:text-blue-400">{resultados[0].periodo}</span></span>
-                                        <button onClick={exportar} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-1 font-semibold transition-colors"><Download className="w-4 h-4" />Exportar CSV</button>
+                                        <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">Período Atual: <span className="font-bold text-blue-600 dark:text-blue-400">{resultados[0].periodo}</span></span>
+                                        <button onClick={baixarNFP} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-1 font-semibold transition-colors"><Download className="w-4 h-4" />Baixar NFP</button>
                                     </div>
                                 </div>
 
@@ -1816,6 +1931,12 @@ functions.http('healthCheck', (req, res) => {
                         </div>
                     </div>
                 )}
+
+                 <footer className="mt-8 py-6 border-t border-gray-200 dark:border-gray-700 text-center">
+                    <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">
+                        Uso Exclusivo e Direitos Reservados - SP Assessoria Contabil
+                    </p>
+                </footer>
 
             </div>
         </div>
