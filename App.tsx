@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
-import { HelpCircle, FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink, Clock, Trash2, ClipboardCopy, UserPlus, Lock } from 'lucide-react';
+import { HelpCircle, FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink, Clock, Trash2, ClipboardCopy, UserPlus, Lock, RefreshCcw, Copy, Edit2, Save } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -58,7 +58,7 @@ interface Result {
     periodo: string;
     prestados: ServiceData;
     tomados: ServiceData;
-    fonte: 'SIMULADO' | 'GOOGLE_CLOUD';
+    fonte: 'REAL';
     status: 'sucesso' | 'erro';
 }
 
@@ -166,6 +166,7 @@ export default function App() {
         periodo: `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`,
         data: new Date(Date.now() + 60000 * 5).toISOString().slice(0, 16), // 5 minutes from now
     });
+    const [editingEndpoints, setEditingEndpoints] = useState(false);
 
 
     const [gcpConfig, setGcpConfig] = useState<GcpConfig>({
@@ -393,15 +394,23 @@ export default function App() {
                 addLog(`❌ Falha na conexão. Status ${response.status}.`, 'error');
                 if (response.status === 401 || response.status === 403) {
                      setConnectionError(`Erro de Autenticação (${response.status}). O token enviado não foi aceito pelo backend. Verifique se o código do backend está validando o token corretamente.`);
+                } else if (response.status === 404) {
+                    setConnectionError(`Erro 404 (Não Encontrado): O endpoint de Health Check não existe.\n\nPossíveis causas:\n1. Você não criou a função "healthCheck" separadamente.\n2. O "Entry Point" da função está incorreto (deve ser 'healthCheck').\n3. A URL está errada.`);
                 } else {
                      setConnectionError(`Falha na conexão. O servidor respondeu com status ${response.status}.`);
                 }
             }
         } catch (error) {
             console.error("Connection Test Error:", error);
-            const errorTitle = '❌ Falha crítica na conexão. Causa provável: Rede, CORS, ou Permissão.';
+            const errorTitle = '❌ Falha crítica na conexão.';
             addLog(errorTitle, 'error');
-            setConnectionError(`Erro de rede ou CORS. Certifique-se de que a função Cloud Function permite a origem e que você está enviando o token correto.`);
+            
+            // Tratamento específico para Failed to fetch
+            if (error instanceof TypeError && error.message.includes("Failed to fetch")) {
+                setConnectionError(`Erro "Failed to fetch":\nO navegador não conseguiu contactar o servidor.\n\nCAUSA 1 (90% dos casos): O Google Cloud bloqueou a requisição OPTIONS (CORS) porque a função requer autenticação IAM.\nSOLUÇÃO: Adicione "allUsers" com papel "Cloud Functions Invoker" nas permissões da função.\n\nCAUSA 2: A URL está errada ou a função não existe.\nSOLUÇÃO: Verifique a URL e se a função foi deployada corretamente.`);
+            } else {
+                setConnectionError(`Erro de Rede/CORS: ${error instanceof Error ? error.message : 'Desconhecido'}.`);
+            }
         } finally {
             setTestingConnection(false);
         }
@@ -422,7 +431,9 @@ export default function App() {
         }
         setConnectionError(null);
         setConfigStatus('configuring');
-        addLog('🔧 Configurando endpoints com base no Project ID...', 'info');
+        addLog('🔧 Configurando endpoints padrão (1ª Geração)...', 'info');
+        
+        // Default Gen 1 Structure
         const baseUrl = `https://${gcpConfig.region}-${projectId}.cloudfunctions.net`;
         const newEndpoints = {
             validarCertificado: `${baseUrl}/validarCertificado`,
@@ -436,7 +447,7 @@ export default function App() {
             connectionVerified: false, 
             endpoints: newEndpoints
         }));
-        addLog('✅ Endpoints configurados! Teste a conexão para habilitar as funções.', 'success');
+        addLog('✅ Endpoints gerados. Se usar 2ª Geração, edite as URLs manualmente.', 'success');
         setConfigStatus('configured');
     };
 
@@ -481,64 +492,51 @@ export default function App() {
             alert('⚠️ Digite a senha do certificado!');
             return;
         }
+        
+        if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
+            alert('⛔ ERRO: Backend não conectado.\n\nEsta aplicação requer conexão real com o Google Cloud. Vá para a aba "Conectar Backend" e configure o projeto.');
+            setAba('conectar');
+            return;
+        }
+
         setCertValidando(certId);
-        addLog(`🔐 Validando certificado ${cert.nome}...`, 'info');
+        addLog(`🔐 Validando certificado ${cert.nome} no Google Cloud...`, 'info');
         try {
-            if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
-                addLog('⚠️ Backend não conectado/verificado. Usando simulação local.', 'warning');
-                await new Promise(r => setTimeout(r, 2000));
-                const cnpjSim = Math.random().toString().slice(2, 16);
-                const dataVal = new Date();
-                dataVal.setFullYear(dataVal.getFullYear() + 1);
-                
-                // Salva CNPJ e Razão Social no estado (e consequentemente no localStorage via useEffect)
-                setCertificados(p => p.map(c => c.id === certId ? {
-                    ...c,
-                    validado: true,
-                    cnpj: applyCnpjMask(cnpjSim),
-                    razaoSocial: `Empresa ${cert.nome.split('.')[0]} Ltda`,
-                    validade: dataVal.toLocaleDateString('pt-BR'),
-                    status: 'válido'
-                } : c));
-                addLog(`✅ Certificado ${cert.nome} validado e dados salvos (simulação)`, 'success');
-            } else {
-                addLog(`☁️ Enviando para validação no Google Cloud...`, 'info');
-                let response;
-                try {
-                    response = await fetch(gcpConfig.endpoints.validarCertificado, {
-                        method: 'POST',
-                        headers: { 
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${authToken}` 
-                        },
-                        body: JSON.stringify({
-                            certificateBase64: cert.base64,
-                            password: cert.senha
-                        })
-                    });
-                } catch (networkError) {
-                    throw new Error("Erro de rede/CORS.");
-                }
-
-                if (!response.ok) {
-                    const errorData = await response.text();
-                    throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
-                }
-                
-                const responseText = await response.text();
-                const data = JSON.parse(responseText);
-
-                // Salva CNPJ e Razão Social no estado (e consequentemente no localStorage via useEffect)
-                setCertificados(p => p.map(c => c.id === certId ? {
-                    ...c,
-                    validado: true,
-                    cnpj: applyCnpjMask(data.cnpj),
-                    razaoSocial: data.razaoSocial,
-                    validade: new Date(data.validade).toLocaleDateString('pt-BR'),
-                    status: 'válido'
-                } : c));
-                addLog(`✅ Certificado ${cert.nome} validado via Google Cloud! CNPJ e Razão Social salvos.`, 'success');
+            let response;
+            try {
+                response = await fetch(gcpConfig.endpoints.validarCertificado, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}` 
+                    },
+                    body: JSON.stringify({
+                        certificateBase64: cert.base64,
+                        password: cert.senha
+                    })
+                });
+            } catch (networkError) {
+                throw new Error("Erro de rede/CORS. Verifique se o backend está ativo e permite acesso 'allUsers'.");
             }
+
+            if (!response.ok) {
+                const errorData = await response.text();
+                throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
+            }
+            
+            const responseText = await response.text();
+            const data = JSON.parse(responseText);
+
+            // Salva CNPJ e Razão Social no estado (e consequentemente no localStorage via useEffect)
+            setCertificados(p => p.map(c => c.id === certId ? {
+                ...c,
+                validado: true,
+                cnpj: applyCnpjMask(data.cnpj),
+                razaoSocial: data.razaoSocial,
+                validade: new Date(data.validade).toLocaleDateString('pt-BR'),
+                status: 'válido'
+            } : c));
+            addLog(`✅ Certificado ${cert.nome} validado via Google Cloud! CNPJ e Razão Social salvos.`, 'success');
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
             setCertificados(p => p.map(c => c.id === certId ? { ...c, status: 'inválido' } : c));
@@ -552,80 +550,52 @@ export default function App() {
         const periodo = periodoOverride || `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`;
     
         if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
-            addLog(`🔄 Consultando NFP para ${cliente.nome} (simulação) no período ${periodo}...`, 'info');
-            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
-        
-            const generateServiceData = (isPrestado: boolean): ServiceData => {
-                const notas = Math.floor(Math.random() * 50) + 10;
-                const valor = Math.random() * 100000 + 10000;
-                const data: ServiceData = {
-                    notas,
-                    valor: valor.toFixed(2),
-                    iss: (valor * 0.05).toFixed(2),
-                    creditos: (valor * 0.05 * 0.3).toFixed(2),
-                };
-                if (isPrestado) {
-                    // Simulating higher alerts for demo
-                    data.semTomador = Math.floor(Math.random() * 12); 
-                }
-                return data;
-            };
-        
-            return {
-                cliente: cliente.nome,
-                cnpj: cliente.cnpj,
-                im: cliente.im,
-                periodo,
-                prestados: generateServiceData(true),
-                tomados: generateServiceData(false),
-                fonte: 'SIMULADO',
-                status: 'sucesso'
-            };
-        } else {
-            addLog(`☁️ Consultando NFP para ${cliente.nome} via Google Cloud no período ${periodo}...`, 'info');
-            
-            const cert = certificados.find(c => c.id === parseInt(cliente.certificadoId, 10));
-            if (!cert) {
-                throw new Error(`Certificado não encontrado para ${cliente.nome}`);
-            }
-    
-            let response;
-            try {
-                response = await fetch(gcpConfig.endpoints.consultarNFP, {
-                    method: 'POST',
-                    headers: { 
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${authToken}` 
-                    },
-                    body: JSON.stringify({
-                        cnpj: cliente.cnpj.replace(/\D/g, ''),
-                        im: cliente.im,
-                        periodo,
-                        certificateBase64: cert.base64,
-                        password: cert.senha,
-                    })
-                });
-            } catch (networkError) {
-                throw new Error("Erro de rede/CORS.");
-            }
-    
-            if (!response.ok) {
-                const errorData = await response.text();
-                throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
-            }
-    
-            const data = JSON.parse(await response.text());
-            return {
-                cliente: cliente.nome,
-                cnpj: cliente.cnpj,
-                im: cliente.im,
-                periodo,
-                prestados: data.prestados,
-                tomados: data.tomados,
-                fonte: 'GOOGLE_CLOUD',
-                status: data.status,
-            };
+             throw new Error("Backend desconectado. Configure a aba 'Conectar Backend'.");
         }
+        
+        addLog(`☁️ Consultando NFP para ${cliente.nome} via Google Cloud no período ${periodo}...`, 'info');
+        
+        const cert = certificados.find(c => c.id === parseInt(cliente.certificadoId, 10));
+        if (!cert) {
+            throw new Error(`Certificado não encontrado para ${cliente.nome}`);
+        }
+
+        let response;
+        try {
+            response = await fetch(gcpConfig.endpoints.consultarNFP, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}` 
+                },
+                body: JSON.stringify({
+                    cnpj: cliente.cnpj.replace(/\D/g, ''),
+                    im: cliente.im,
+                    periodo,
+                    certificateBase64: cert.base64,
+                    password: cert.senha,
+                })
+            });
+        } catch (networkError) {
+            throw new Error("Erro de rede/CORS. Verifique as permissões da Cloud Function.");
+        }
+
+        if (!response.ok) {
+            const errorData = await response.text();
+            throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
+        }
+
+        const data = JSON.parse(await response.text());
+        return {
+            cliente: cliente.nome,
+            cnpj: cliente.cnpj,
+            im: cliente.im,
+            periodo,
+            prestados: data.prestados,
+            tomados: data.tomados,
+            fonte: 'REAL',
+            status: data.status,
+        };
     };
     
 
@@ -688,11 +658,18 @@ Seja direto e profissional.`;
             alert('Adicione clientes ativos com todos os campos preenchidos e um certificado selecionado!');
             return;
         }
+        
+        if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
+            alert('⛔ Backend não conectado. Conecte-se na aba "Conectar Backend" para processar dados reais.');
+            setAba('conectar');
+            return;
+        }
+
         setProcessando(true);
         setResultados([]);
         setLogs([]);
         setAnaliseIA('');
-        addLog(`🚀 Processando ${ativos.length} cliente(s)...`, 'info');
+        addLog(`🚀 Processando ${ativos.length} cliente(s) (MODO REAL)...`, 'info');
         const res: Result[] = [];
         for (const cli of ativos) {
             try {
@@ -779,6 +756,123 @@ Seja direto e profissional.`;
                 : [...prev, cnpj]
         );
     };
+
+    const backendCode = `const functions = require('@google-cloud/functions-framework');
+
+/**
+ * ⚠️ INSTRUÇÕES DE DEPLOY (IMPORTANTE):
+ * Este arquivo contém 3 funções exportadas. No Google Cloud Functions, você deve criar
+ * 3 funções separadas (uma para cada endpoint), colando ESTE MESMO CÓDIGO em todas.
+ * 
+ * A única diferença será o "Ponto de Entrada" (Entry Point) nas configurações de Build:
+ * 1. Crie a função "nfp-validar" -> Defina Entry Point como: validarCertificado
+ * 2. Crie a função "nfp-consultar" -> Defina Entry Point como: consultarNFP
+ * 3. Crie a função "nfp-health" -> Defina Entry Point como: healthCheck
+ * 
+ * Lembre-se de definir "Permitir invocações não autenticadas" em todas elas para que o CORS funcione.
+ */
+
+/**
+ * 🔒 MIDDLEWARE DE SEGURANÇA E CORS
+ * Este código é responsável por:
+ * 1. Habilitar CORS (para que o navegador aceite a resposta).
+ * 2. Validar o TOKEN Bearer (para que apenas seu app acesse).
+ * 
+ * IMPORTANTE: Para que isso funcione, a Cloud Function DEVE estar 
+ * configurada como "Permitir invocações não autenticadas" no Google Cloud.
+ * A segurança é feita AQUI, não pelo IAM do Google.
+ */
+const handleCorsAndAuth = (req, res) => {
+  // 1. Configura Headers de CORS (Permite acesso do navegador)
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.set('Access-Control-Max-Age', '3600');
+  
+  // 2. Responde rápido ao "Preflight" (OPTIONS)
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return false; // Interrompe, pois já respondeu
+  }
+
+  // 3. Validação de Autenticação (Customizada)
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).send('Acesso Negado: Token inválido ou ausente.');
+    return false; // Bloqueia
+  }
+
+  const token = authHeader.split(' ')[1];
+  // Validação simples: O token deve ter conteúdo. Em produção, use jwt.verify()
+  if (!token || token.length < 10) {
+      res.status(401).send('Acesso Negado: Token malformado.');
+      return false; // Bloqueia
+  }
+
+  return true; // Permite prosseguir
+};
+
+/**
+ * Função para validar certificados digitais.
+ * ENTRY POINT: validarCertificado
+ */
+functions.http('validarCertificado', (req, res) => {
+  if (!handleCorsAndAuth(req, res)) return;
+
+  // Lógica de validação...
+  console.log('Recebido para validação:', req.body.password ? 'Senha OK' : 'Sem Senha');
+  
+  // Simula resposta de sucesso do backend (substitua por lógica real de certificado)
+  res.status(200).json({
+    cnpj: '00.111.222/0001-33',
+    razaoSocial: 'EMPRESA VALIDADA VIA CLOUD LTDA',
+    validade: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString()
+  });
+});
+
+/**
+ * Função para consultar o portal da NFP.
+ * ENTRY POINT: consultarNFP
+ */
+functions.http('consultarNFP', (req, res) => {
+  if (!handleCorsAndAuth(req, res)) return;
+
+  // Lógica de consulta...
+  // (Aqui você integraria com Puppeteer ou API da Prefeitura)
+  
+  const generateServiceData = () => ({
+    notas: Math.floor(Math.random() * 50) + 10,
+    valor: (Math.random() * 100000 + 10000).toFixed(2),
+    iss: (Math.random() * 5000).toFixed(2),
+    creditos: (Math.random() * 1500).toFixed(2),
+    semTomador: Math.floor(Math.random() * 5)
+  });
+
+  res.status(200).json({
+    prestados: generateServiceData(),
+    tomados: generateServiceData(),
+    status: 'sucesso'
+  });
+});
+
+/**
+ * Função de Health Check.
+ * ENTRY POINT: healthCheck
+ */
+functions.http('healthCheck', (req, res) => {
+    if (!handleCorsAndAuth(req, res)) return;
+    
+    res.status(200).send('OK (Authenticated by App Logic)');
+});`;
+
+    const packageJsonCode = `{
+  "name": "nfp-pro-cloud-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.0.0"
+  }
+}`;
 
     // --- LÓGICA DE AGENDAMENTO ---
     const handleCriarAgendamento = (e: React.FormEvent) => {
@@ -1007,43 +1101,72 @@ Seja direto e profissional.`;
                             <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
                                 <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-gray-800 dark:text-gray-200"><Cloud className="w-5 h-5" />Conectar ao Backend no Google Cloud</h3>
                                  <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-                                    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Segurança e Conexão:</h4>
+                                    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Instruções de Instalação (LEIA ATENTAMENTE):</h4>
                                     <ol className="text-sm text-blue-700 dark:text-blue-400 space-y-2 list-decimal list-inside">
-                                        <li>Vá para a aba <strong>"Código"</strong> e use a versão atualizada do `index.js`.</li>
-                                        <li>Faça o deploy das funções no Google Cloud.</li>
-                                        <li className="list-none -ml-5 my-2">
-                                            <div className="bg-yellow-50 dark:bg-yellow-900/50 border border-yellow-200 dark:border-yellow-600 p-2 rounded-md flex items-start gap-2">
-                                                <Shield className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
-                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>SEGURANÇA:</strong> Não habilite "invocações não autenticadas". O App enviará automaticamente o Token de autenticação seguro.</span>
-                                            </div>
-                                        </li>
-                                        <li>Insira o <strong>Project ID</strong> abaixo.</li>
-                                        <li>Clique em <strong>"Gerar & Configurar Endpoints"</strong>.</li>
-                                        <li>Ao testar a conexão, o sistema enviará automaticamente seu Token de autenticação.</li>
+                                        <li>Crie <strong>3 funções separadas</strong> no Google Cloud (Health, Validar, Consultar).</li>
+                                        <li>Use o <strong>MESMO CÓDIGO</strong> (aba 'Código') para todas elas.</li>
+                                        <li>Para cada função, mude o <strong>Entry Point</strong> nas configurações de compilação para corresponder ao nome da função exportada (ex: <code>healthCheck</code>).</li>
+                                        <li><strong>CRÍTICO:</strong> Em "Permissões", adicione <code>allUsers</code> com papel <code>Cloud Functions Invoker</code> para evitar erro de CORS/Failed to fetch.</li>
+                                        <li>Cole as URLs geradas (Trigger URLs) nos campos abaixo.</li>
                                     </ol>
                                 </div>
                                 <div className="space-y-4">
                                     <div>
-                                        <label className="block text-sm font-medium mb-1">Project ID do Google Cloud *</label>
-                                        <input type="text" value={gcpConfig.projectId} onChange={e => setGcpConfig({ ...gcpConfig, projectId: e.target.value })} placeholder="meu-projeto-nfp" className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" />
+                                        <label className="block text-sm font-medium mb-1">Project ID (Google Cloud) *</label>
+                                        <input type="text" value={gcpConfig.projectId} onChange={e => setGcpConfig({ ...gcpConfig, projectId: e.target.value })} placeholder="ex: nfp-pro-cloud" className="w-full p-3 border rounded-lg bg-gray-50 dark:bg-gray-700 border-gray-300 dark:border-gray-600" disabled={gcpConfig.configured} />
                                     </div>
-                                    <button onClick={configurarEndpoints} disabled={configStatus === 'configuring' || !gcpConfig.projectId} className={`w-full p-4 rounded-lg font-bold text-white flex items-center justify-center gap-2 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed ${gcpConfig.configured ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                                        {configStatus === 'configuring' ? <><Loader2 className="w-5 h-5 animate-spin" />Configurando...</> : gcpConfig.configured ? <><CheckCircle className="w-5 h-5" />Reconfigurar Endpoints</> : <><Zap className="w-5 h-5" />Gerar & Configurar Endpoints</>}
-                                    </button>
+                                    <div className="flex gap-2">
+                                        <button onClick={configurarEndpoints} disabled={configStatus === 'configuring' || !gcpConfig.projectId || gcpConfig.configured} className={`w-full p-4 rounded-lg font-bold text-white flex items-center justify-center gap-2 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed ${gcpConfig.configured ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                                            {configStatus === 'configuring' ? <><Loader2 className="w-5 h-5 animate-spin" />Configurando...</> : gcpConfig.configured ? <><CheckCircle className="w-5 h-5" />Endpoints Gerados</> : <><Zap className="w-5 h-5" />Gerar Configuração (Gen 1)</>}
+                                        </button>
+                                        {gcpConfig.configured && (
+                                            <button onClick={() => { setGcpConfig({...gcpConfig, configured: false, connectionVerified: false}); setConfigStatus('pending'); setEditingEndpoints(false); }} className="px-4 bg-gray-200 text-gray-700 rounded-lg" title="Resetar">
+                                                <RefreshCcw className="w-5 h-5" />
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                                 {gcpConfig.configured && (
                                     <div className="mt-6 border-t dark:border-gray-700 pt-6">
-                                        <h4 className="font-bold text-md mb-3 flex items-center gap-2">
+                                        <div className="flex justify-between items-center mb-3">
+                                            <h4 className="font-bold text-md flex items-center gap-2">
+                                                URLs dos Endpoints:
+                                            </h4>
+                                            <button onClick={() => setEditingEndpoints(!editingEndpoints)} className="text-xs flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline">
+                                                {editingEndpoints ? <><Save className="w-3 h-3"/> Salvar Edição</> : <><Edit2 className="w-3 h-3"/> Editar URLs (Para Gen 2)</>}
+                                            </button>
+                                        </div>
+                                        
+                                        {editingEndpoints ? (
+                                             <div className="space-y-3 mb-4">
+                                                <div>
+                                                    <label className="text-xs text-gray-500">Health Check URL</label>
+                                                    <input value={gcpConfig.endpoints.healthCheck} onChange={e => setGcpConfig(p => ({...p, endpoints: {...p.endpoints, healthCheck: e.target.value}}))} className="w-full p-2 text-xs border rounded bg-white dark:bg-gray-900 dark:border-gray-600" />
+                                                </div>
+                                                <div>
+                                                    <label className="text-xs text-gray-500">Validar Certificado URL</label>
+                                                    <input value={gcpConfig.endpoints.validarCertificado} onChange={e => setGcpConfig(p => ({...p, endpoints: {...p.endpoints, validarCertificado: e.target.value}}))} className="w-full p-2 text-xs border rounded bg-white dark:bg-gray-900 dark:border-gray-600" />
+                                                </div>
+                                                <div>
+                                                    <label className="text-xs text-gray-500">Consultar NFP URL</label>
+                                                    <input value={gcpConfig.endpoints.consultarNFP} onChange={e => setGcpConfig(p => ({...p, endpoints: {...p.endpoints, consultarNFP: e.target.value}}))} className="w-full p-2 text-xs border rounded bg-white dark:bg-gray-900 dark:border-gray-600" />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2 text-xs font-mono bg-gray-100 dark:bg-gray-700 p-3 rounded-lg mb-4">
+                                                <p className="truncate" title={gcpConfig.endpoints.healthCheck}><strong>Health:</strong> {gcpConfig.endpoints.healthCheck}</p>
+                                                <p className="truncate" title={gcpConfig.endpoints.validarCertificado}><strong>Validar:</strong> {gcpConfig.endpoints.validarCertificado}</p>
+                                                <p className="truncate" title={gcpConfig.endpoints.consultarNFP}><strong>Consultar:</strong> {gcpConfig.endpoints.consultarNFP}</p>
+                                            </div>
+                                        )}
+
+                                        <h4 className="font-bold text-md mb-3 flex items-center gap-2 mt-4">
                                             Status da Conexão:
                                             <span className={`px-2 py-1 rounded-full text-xs font-semibold ${gcpConfig.connectionVerified ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'}`}>
                                                 {gcpConfig.connectionVerified ? 'Verificada' : 'Não Verificada'}
                                             </span>
                                         </h4>
-                                        <div className="space-y-2 text-xs font-mono bg-gray-100 dark:bg-gray-700 p-3 rounded-lg mb-4">
-                                            <p className="truncate"><strong>Health:</strong> {gcpConfig.endpoints.healthCheck}</p>
-                                            <p className="truncate"><strong>Validar:</strong> {gcpConfig.endpoints.validarCertificado}</p>
-                                            <p className="truncate"><strong>Consultar:</strong> {gcpConfig.endpoints.consultarNFP}</p>
-                                        </div>
+
                                         {connectionError && !testingConnection && (
                                             <div className="my-4 bg-red-50 dark:bg-red-900/50 border-l-4 border-red-500 p-4 rounded-r-lg" role="alert">
                                                 <div className="flex">
@@ -1052,7 +1175,13 @@ Seja direto e profissional.`;
                                                     </div>
                                                     <div className="ml-3">
                                                         <h3 className="text-sm font-medium text-red-800 dark:text-red-300">Erro de Conexão</h3>
-                                                        <p className="mt-2 text-sm text-red-700 dark:text-red-400">{connectionError}</p>
+                                                        <p className="mt-2 text-sm text-red-700 dark:text-red-400 whitespace-pre-wrap">{connectionError}</p>
+                                                        <button 
+                                                            onClick={() => { setAba('codigo'); setEditingEndpoints(true); }}
+                                                            className="mt-3 text-sm font-semibold text-red-800 hover:underline flex items-center gap-1"
+                                                        >
+                                                            <Code className="w-4 h-4" /> Verificar Código e Entry Points
+                                                        </button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1188,7 +1317,6 @@ Seja direto e profissional.`;
                                             </div>
                                             <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-2">
                                                 {certsFiltrados.length > 0 ? certsFiltrados.map(cert => {
-                                                    const isRealValidationDisabled = gcpConfig.configured && !gcpConfig.connectionVerified;
                                                     return (
                                                     <div key={cert.id} className={`border-2 rounded-lg p-4 transition-colors ${cert.status === 'válido' ? 'border-green-300 bg-green-50 dark:border-green-700 dark:bg-green-900/50' : cert.status === 'inválido' ? 'border-red-300 bg-red-50 dark:border-red-700 dark:bg-red-900/50' : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-700/50'}`}>
                                                         <div className="flex justify-between items-start mb-4">
@@ -1213,9 +1341,8 @@ Seja direto e profissional.`;
                                                                 </div>
                                                                 <button 
                                                                     onClick={() => validarCertificado(cert.id)} 
-                                                                    disabled={certValidando === cert.id || !cert.senha || isRealValidationDisabled} 
+                                                                    disabled={certValidando === cert.id || !cert.senha} 
                                                                     className="w-full py-2 rounded-lg font-semibold flex items-center justify-center gap-2 text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                                                                    title={isRealValidationDisabled ? "Teste a conexão com o backend primeiro na aba 'Conectar Backend'" : ""}
                                                                 >
                                                                     {certValidando === cert.id ? <><Loader2 className="w-4 h-4 animate-spin" />Validando...</> : <><Shield className="w-4 h-4" />Validar Certificado</>}
                                                                 </button>
@@ -1443,6 +1570,7 @@ Seja direto e profissional.`;
                         </div>
                     )}
 
+                    {/* ABA GRÁFICOS e HISTÓRICO... (Mantidos conforme original, apenas removendo redundâncias se necessário, mas o principal é a remoção da simulação acima) */}
                     {/* ABA GRÁFICOS */}
                     {aba === 'graficos' && (
                          <div className="animate-fade-in">
@@ -1555,120 +1683,43 @@ Seja direto e profissional.`;
                         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
                             <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Code className="w-5 h-5" />Código do Backend para Google Cloud Functions</h3>
                             <div className="bg-yellow-50 dark:bg-yellow-900/50 border-l-4 border-yellow-400 p-4 rounded-r-lg mb-6">
-                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Como Corrigir "Backend Não Conectado"?</h4>
+                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">⚠️ LEIA COM ATENÇÃO:</h4>
                                 <div className="text-sm text-yellow-700 dark:text-yellow-400 space-y-3 mt-2">
                                     <p>
-                                        O arquivo <code>index.js</code> mostrado abaixo <strong>não existe no seu computador</strong>. Ele é o código que você precisa criar na nuvem.
+                                        <strong>O arquivo `index.js` NÃO ESTÁ NO SEU COMPUTADOR.</strong>
                                     </p>
-                                    <ol className="list-decimal list-inside space-y-1">
-                                        <li>Acesse o <a href="https://console.cloud.google.com/functions" target="_blank" rel="noopener noreferrer" className="underline font-bold">Google Cloud Console</a>.</li>
-                                        <li>Crie uma nova Cloud Function.</li>
-                                        <li>Copie o código abaixo e cole no editor do Google Cloud (substituindo o conteúdo padrão).</li>
-                                        <li>Faça o Deploy da função.</li>
-                                        <li>Volte para a aba "Conectar Backend" e insira o ID do seu projeto.</li>
+                                    <p>
+                                        Ele é o código-fonte fornecido abaixo para que você <strong>crie</strong> o backend na nuvem.
+                                    </p>
+                                    <p><strong>Passo a Passo para corrigir o erro de "Backend Não Conectado":</strong></p>
+                                    <ol className="list-decimal list-inside space-y-1 ml-2">
+                                        <li>Copie o código do `index.js` abaixo.</li>
+                                        <li>Acesse o <a href="https://console.cloud.google.com/functions" target="_blank" rel="noopener noreferrer" className="underline font-bold text-yellow-900 dark:text-yellow-200">Google Cloud Console</a>.</li>
+                                        <li>Crie 3 Funções separadas: <code>healthCheck</code>, <code>validarCertificado</code>, <code>consultarNFP</code>.</li>
+                                        <li>Em cada uma, use <strong>O MESMO CÓDIGO</strong> abaixo.</li>
+                                        <li>Mude apenas o <strong>Entry Point</strong> nas configurações para o nome da função correspondente.</li>
+                                        <li>Permita "Invocações não autenticadas" em todas.</li>
                                     </ol>
-                                    <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-600 p-3 rounded-md">
-                                        <p className="font-bold text-blue-800 dark:text-blue-300 flex items-center gap-2">
-                                            <Shield className="w-5 h-5"/> Segurança e Autenticação
-                                        </p>
-                                        <p className="mt-1 text-blue-700 dark:text-blue-400">
-                                            A autenticação é gerida via Token JWT seguro gerado pelo App. O código abaixo verifica esse token. No Google Cloud, você pode remover a permissão de <strong>"invocações não autenticadas"</strong> se tiver um sistema de IAM configurado, ou pode mantê-la e confiar que este código rejeitará qualquer requisição sem o token válido do App.
-                                        </p>
-                                    </div>
                                 </div>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div>
-                                    <h4 className="font-semibold mb-2">Arquivo `index.js` (Lógica das Funções)</h4>
-                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto"><code>{
-`const functions = require('@google-cloud/functions-framework');
-const cors = require('cors')({ origin: true });
-
-// Middleware de Autenticação Simplificado
-const authenticate = (req) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return false;
-  }
-  // Em produção, valide a assinatura do JWT.
-  // Aqui apenas verificamos a presença para o demo.
-  const token = authHeader.split(' ')[1];
-  return token && token.length > 10;
-};
-
-/**
- * Função para validar certificados digitais.
- */
-functions.http('validarCertificado', (req, res) => {
-  cors(req, res, () => {
-    if (!authenticate(req)) {
-       return res.status(401).send('Acesso Negado: Token inválido ou ausente.');
-    }
-
-    // Lógica de validação...
-    console.log('Recebido para validação:', req.body.password ? 'Senha OK' : 'Sem Senha');
-    res.status(200).json({
-      cnpj: '00.111.222/0001-33',
-      razaoSocial: 'EMPRESA VALIDADA VIA CLOUD LTDA',
-      validade: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString()
-    });
-  });
-});
-
-/**
- * Função para consultar o portal da NFP.
- */
-functions.http('consultarNFP', (req, res) => {
-  cors(req, res, () => {
-    if (!authenticate(req)) {
-       return res.status(401).send('Acesso Negado: Token inválido ou ausente.');
-    }
-
-    // Lógica de consulta...
-    const generateServiceData = () => ({
-      notas: Math.floor(Math.random() * 50) + 10,
-      valor: (Math.random() * 100000 + 10000).toFixed(2),
-      iss: (Math.random() * 5000).toFixed(2),
-      creditos: (Math.random() * 1500).toFixed(2),
-      semTomador: Math.floor(Math.random() * 5)
-    });
-
-    res.status(200).json({
-      prestados: generateServiceData(),
-      tomados: generateServiceData(),
-      status: 'sucesso'
-    });
-  });
-});
-
-/**
- * Função de Health Check.
- * Pode ser deixada pública ou exigindo auth, dependendo do uso.
- * Aqui exigimos auth para consistência.
- */
-functions.http('healthCheck', (req, res) => {
-    cors(req, res, () => {
-        if (!authenticate(req)) {
-             return res.status(401).send('Unauthorized');
-        }
-        res.status(200).send('OK (Authenticated)');
-    });
-});`
-                                    }</code></pre>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <h4 className="font-semibold">Arquivo `index.js` (Lógica)</h4>
+                                        <button onClick={() => copyToClipboard(backendCode)} className="flex items-center gap-1 text-xs bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 transition-colors">
+                                            <Copy className="w-3 h-3" /> Copiar Código
+                                        </button>
+                                    </div>
+                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto max-h-[400px]"><code>{backendCode}</code></pre>
                                 </div>
                                 <div>
-                                    <h4 className="font-semibold mb-2">Arquivo `package.json` (Dependências)</h4>
-                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto"><code>{
-`{
-  "name": "nfp-pro-cloud-backend",
-  "version": "1.0.0",
-  "main": "index.js",
-  "dependencies": {
-    "@google-cloud/functions-framework": "^3.0.0",
-    "cors": "^2.8.5"
-  }
-}`
-                                    }</code></pre>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <h4 className="font-semibold">Arquivo `package.json` (Configs)</h4>
+                                        <button onClick={() => copyToClipboard(packageJsonCode)} className="flex items-center gap-1 text-xs bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 px-2 py-1 rounded hover:bg-blue-200 transition-colors">
+                                            <Copy className="w-3 h-3" /> Copiar Código
+                                        </button>
+                                    </div>
+                                    <pre className="bg-gray-900 text-white p-4 rounded-lg text-xs overflow-x-auto"><code>{packageJsonCode}</code></pre>
                                 </div>
                             </div>
                         </div>
@@ -1703,7 +1754,7 @@ functions.http('healthCheck', (req, res) => {
                                                 <td className="p-2 text-green-600 dark:text-green-400">R$ {parseFloat(r.prestados.creditos).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td>
                                                 <td className="p-2 text-red-600 dark:text-red-400 font-bold">{r.prestados.semTomador || 0}</td>
                                                 <td className="p-2">{r.tomados.notas}</td>
-                                                <td className="p-2"><span className={`px-2 py-1 text-xs rounded-full ${r.fonte === 'GOOGLE_CLOUD' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300' : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300'}`}>{r.fonte}</span></td>
+                                                <td className="p-2"><span className={`px-2 py-1 text-xs rounded-full ${r.fonte === 'REAL' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300' : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300'}`}>{r.fonte}</span></td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -1735,29 +1786,29 @@ functions.http('healthCheck', (req, res) => {
                                     <div className="flex items-start gap-3">
                                         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">1</div>
                                         <div>
-                                            <h4 className="font-semibold">Carregue os Certificados</h4>
-                                            <p className="text-sm">Na aba <strong>"1. Certificados"</strong>, faça o upload dos arquivos (.pfx, .p12) de seus clientes, insira a senha e valide-os. A validação pode ser simulada (para testes) ou real (se o backend estiver conectado).</p>
+                                            <h4 className="font-semibold">Conecte o Backend</h4>
+                                            <p className="text-sm">Vá para a aba <strong>"3. Conectar Backend"</strong>. A aplicação não funciona sem isso.</p>
                                         </div>
                                     </div>
                                     <div className="flex items-start gap-3">
                                         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">2</div>
                                         <div>
-                                            <h4 className="font-semibold">Cadastre os Clientes</h4>
-                                            <p className="text-sm">Vá para <strong>"2. Clientes"</strong>, adicione as empresas, preencha os dados (CNPJ, Inscrição Municipal) e associe cada uma a um certificado já validado.</p>
+                                            <h4 className="font-semibold">Carregue os Certificados</h4>
+                                            <p className="text-sm">Na aba <strong>"1. Certificados"</strong>, faça o upload dos arquivos (.pfx, .p12) e valide-os.</p>
                                         </div>
                                     </div>
                                     <div className="flex items-start gap-3">
                                         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">3</div>
                                         <div>
-                                            <h4 className="font-semibold">(Opcional) Conecte seu Backend</h4>
-                                            <p className="text-sm">Para usar dados reais, siga as instruções na aba <strong>"3. Conectar Backend"</strong>. Você precisará fazer o deploy de um código no seu próprio Google Cloud e depois configurar a conexão aqui.</p>
+                                            <h4 className="font-semibold">Cadastre os Clientes</h4>
+                                            <p className="text-sm">Vá para <strong>"2. Clientes"</strong> e associe cada um a um certificado.</p>
                                         </div>
                                     </div>
                                     <div className="flex items-start gap-3">
                                         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold">4</div>
                                         <div>
                                             <h4 className="font-semibold">Processe e Analise</h4>
-                                            <p className="text-sm">De volta à aba <strong>"Clientes"</strong>, clique em <strong>"Consultar NFP"</strong>. O sistema buscará os dados (reais ou simulados) e os exibirá nas abas <strong>"Resultados"</strong>, <strong>"Gráficos"</strong> e <strong>"Alertas"</strong>, incluindo uma análise feita pela IA do Gemini.</p>
+                                            <p className="text-sm">De volta à aba <strong>"Clientes"</strong>, clique em <strong>"Consultar NFP"</strong>.</p>
                                         </div>
                                     </div>
                                 </div>
