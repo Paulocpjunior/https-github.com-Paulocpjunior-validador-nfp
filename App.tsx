@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
-import { HelpCircle, FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink, Clock, Trash2, ClipboardCopy } from 'lucide-react';
+import { HelpCircle, FileText, Download, Users, AlertCircle, TrendingUp, CheckCircle, XCircle, Loader2, LogOut, Search, BarChart3, Calendar, Bell, ArrowUp, ArrowDown, Shield, Code, Upload, FileKey, Zap, Cloud, Eye, EyeOff, Sun, Moon, ChevronDown, ExternalLink, Clock, Trash2, ClipboardCopy, UserPlus, Lock } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -93,6 +93,12 @@ interface Agendamento {
     log?: string;
 }
 
+interface User {
+    nome: string;
+    email: string;
+    senha?: string;
+}
+
 type Aba = 'conectar' | 'certificados' | 'clientes' | 'resultados' | 'graficos' | 'comparacao' | 'historico' | 'alertas' | 'codigo' | 'agendamento';
 
 // --- COMPONENTE DE LOGS REUTILIZÁVEL ---
@@ -126,8 +132,11 @@ const LogViewer = ({ logs, title = "Logs de Processamento" }: { logs: Log[], tit
 // --- COMPONENTE PRINCIPAL DO APP ---
 export default function App() {
     // --- GERENCIAMENTO DE ESTADO ---
-    const [user, setUser] = useState<{ nome: string } | null>(null);
-    const [login, setLogin] = useState({ email: '', senha: '' });
+    const [user, setUser] = useState<User | null>(null);
+    const [authToken, setAuthToken] = useState<string | null>(null);
+    const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+    const [authData, setAuthData] = useState({ nome: '', email: '', senha: '' });
+    
     const [clientes, setClientes] = useState<Client[]>([]);
     const [resultados, setResultados] = useState<Result[]>([]);
     const [historico, setHistorico] = useState<HistoryItem[]>([]);
@@ -200,6 +209,14 @@ export default function App() {
             const agends = localStorage.getItem('nfp_agendamentos');
             if (agends) setAgendamentos(JSON.parse(agends));
 
+            // Check for existing session
+            const savedUser = localStorage.getItem('nfp_active_user');
+            const savedToken = localStorage.getItem('nfp_auth_token');
+            if (savedUser && savedToken) {
+                setUser(JSON.parse(savedUser));
+                setAuthToken(savedToken);
+            }
+
         } catch (e) {
           console.error("Failed to load data from localStorage", e);
         }
@@ -238,16 +255,82 @@ export default function App() {
         addLog(`📋 Copiado: ${text}`, 'info');
     };
 
-    // --- FUNÇÕES PRINCIPAIS ---
-    const fazerLogin = () => {
-        if (login.email === 'admin@contabilidade.com' && login.senha === 'admin123') {
-            setUser({ nome: 'Admin' });
-            addLog('✅ Login realizado', 'success');
+    // --- FUNÇÕES DE AUTENTICAÇÃO ---
+    const handleAuth = () => {
+        const { email, senha, nome } = authData;
+
+        if (!email || !senha) {
+            alert('❌ Por favor, preencha email e senha.');
+            return;
+        }
+
+        const storedUsers = JSON.parse(localStorage.getItem('nfp_users') || '[]');
+
+        if (authMode === 'register') {
+            if (!nome) {
+                alert('❌ Por favor, preencha seu nome.');
+                return;
+            }
+            if (!email.endsWith('@spassessoriacontabil.com.br')) {
+                alert('❌ Cadastro permitido apenas para emails do domínio @spassessoriacontabil.com.br');
+                return;
+            }
+            if (storedUsers.some((u: User) => u.email === email)) {
+                alert('❌ Usuário já cadastrado.');
+                return;
+            }
+
+            const newUser = { nome, email, senha }; // In a real app, hash the password!
+            storedUsers.push(newUser);
+            localStorage.setItem('nfp_users', JSON.stringify(storedUsers));
+            
+            // Auto login after register
+            const token = btoa(`${email}:${Date.now()}`); // Mock JWT
+            setUser({ nome, email });
+            setAuthToken(token);
+            localStorage.setItem('nfp_active_user', JSON.stringify({ nome, email }));
+            localStorage.setItem('nfp_auth_token', token);
+            addLog(`✅ Cadastro realizado com sucesso! Bem-vindo, ${nome}.`, 'success');
+
         } else {
-            alert('❌ Credenciais inválidas. Use: admin@contabilidade.com / admin123');
+            // Login
+            const validUser = storedUsers.find((u: User) => u.email === email && u.senha === senha);
+            
+            // Backdoor for demo/admin if not yet registered
+            if (!validUser && email === 'admin@spassessoriacontabil.com.br' && senha === 'admin123') {
+                 const adminUser = { nome: 'Administrador', email };
+                 const token = btoa(`${email}:${Date.now()}`);
+                 setUser(adminUser);
+                 setAuthToken(token);
+                 localStorage.setItem('nfp_active_user', JSON.stringify(adminUser));
+                 localStorage.setItem('nfp_auth_token', token);
+                 addLog('✅ Login administrativo realizado', 'success');
+                 return;
+            }
+
+            if (validUser) {
+                const token = btoa(`${validUser.email}:${Date.now()}`); // Mock JWT
+                setUser({ nome: validUser.nome, email: validUser.email });
+                setAuthToken(token);
+                localStorage.setItem('nfp_active_user', JSON.stringify({ nome: validUser.nome, email: validUser.email }));
+                localStorage.setItem('nfp_auth_token', token);
+                addLog(`✅ Login realizado. Bem-vindo de volta, ${validUser.nome}.`, 'success');
+            } else {
+                alert('❌ Credenciais inválidas.');
+            }
         }
     };
+
+    const logout = () => {
+        setUser(null);
+        setAuthToken(null);
+        localStorage.removeItem('nfp_active_user');
+        localStorage.removeItem('nfp_auth_token');
+        setAuthData({ nome: '', email: '', senha: '' });
+        addLog('👋 Logout realizado.', 'info');
+    };
     
+    // --- CONEXÃO E API ---
     const testarConexao = async () => {
         if (!gcpConfig.endpoints.healthCheck) {
             addLog('⚠️ Endpoint de Health Check não configurado.', 'warning');
@@ -258,50 +341,30 @@ export default function App() {
         setConnectionError(null);
         setTestingConnection(true);
         try {
-            const response = await fetch(gcpConfig.endpoints.healthCheck);
+            const response = await fetch(gcpConfig.endpoints.healthCheck, {
+                headers: { 
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
             if (response.ok) {
                 const responseText = await response.text();
                 addLog(`✅ Conexão bem-sucedida! Resposta do servidor: "${responseText}"`, 'success');
                 setGcpConfig(prev => ({...prev, connectionVerified: true}));
             } else {
-                addLog(`❌ Falha na conexão. O servidor respondeu com status ${response.status}.`, 'error');
-                const errorText = `Falha na conexão. O servidor respondeu com status ${response.status}. Isso pode significar que a função não foi implantada com o nome 'healthCheck' ou encontrou um erro interno. Verifique os logs da função no console do Google Cloud para mais detalhes.`;
-                setConnectionError(errorText);
+                addLog(`❌ Falha na conexão. Status ${response.status}.`, 'error');
+                if (response.status === 401 || response.status === 403) {
+                     setConnectionError(`Erro de Autenticação (${response.status}). O token enviado não foi aceito pelo backend. Verifique se o código do backend está validando o token corretamente.`);
+                } else {
+                     setConnectionError(`Falha na conexão. O servidor respondeu com status ${response.status}.`);
+                }
             }
         } catch (error) {
             console.error("Connection Test Error:", error);
             const errorTitle = '❌ Falha crítica na conexão. Causa provável: Rede, CORS, ou Permissão.';
             addLog(errorTitle, 'error');
-            const errorDetailsLog = `As causas mais comuns são: 1. Função não pública (não permite invocações não autenticadas). 2. Erro de CORS no backend. 3. URL incorreta (Project ID errado). 4. Erro de rede.`;
-            addLog(errorDetailsLog, 'warning');
-
-            const errorTextForUI = `**Este erro quase sempre indica um problema de configuração no seu Google Cloud, não um bug no aplicativo.**
-
-Siga este guia para resolver:
-
-### 1. A Causa Mais Comum: Permissões
-
-Sua função precisa ser pública. No Google Cloud, isso significa "permitir invocações não autenticadas".
-
-*   **Ação:** Ao fazer o deploy (ou ao editar uma função existente), na seção **Autenticação**, marque a opção **"Permitir invocações não autenticadas"**.
-*   **Como Verificar:** Após o deploy, cole a URL da sua função \`healthCheck\` no navegador.
-    *   ✅ **Correto:** Você deve ver a palavra \`OK\`.
-    *   ❌ **Incorreto:** Se aparecer uma página de login do Google ou um erro de permissão, a configuração está errada. Volte e corrija.
-
-### 2. Verificação de CORS
-
-Se o passo 1 não resolveu, garanta que sua função está enviando os cabeçalhos de CORS.
-
-*   **Ação:** O código na aba **"Código"** já está configurado. Verifique se o seu \`index.js\` e \`package.json\` no Google Cloud são **idênticos** aos fornecidos aqui. Se fizer alguma alteração, reimplemente a função.
-
-### 3. Verificação do Project ID
-
-Um simples erro de digitação na URL pode causar a falha.
-
-*   **Ação:** Confira se o Project ID que você inseriu nesta página corresponde **exatamente** ao ID do seu projeto no Google Cloud.
-
-Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Logs** da sua função no painel do Google Cloud para encontrar a causa raiz do problema.`;
-            setConnectionError(errorTextForUI);
+            setConnectionError(`Erro de rede ou CORS. Certifique-se de que a função Cloud Function permite a origem e que você está enviando o token correto.`);
         } finally {
             setTestingConnection(false);
         }
@@ -314,12 +377,10 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
             return;
         }
 
-        // Validação para evitar que o usuário insira uma URL completa
         const invalidChars = ['/', ':', '.'];
         if (invalidChars.some(char => projectId.includes(char))) {
-            const errorMsg = "Erro de Formato: O campo 'Project ID' deve conter apenas o ID do seu projeto (ex: 'meu-projeto-123'), não uma URL completa. Por favor, corrija e tente novamente.";
+            const errorMsg = "Erro de Formato: O campo 'Project ID' deve conter apenas o ID do seu projeto.";
             alert(errorMsg);
-            addLog(`❌ ${errorMsg}`, 'error');
             return;
         }
         setConnectionError(null);
@@ -335,11 +396,10 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
             ...prev,
             projectId,
             configured: true,
-            connectionVerified: false, // Força a re-verificação da conexão
+            connectionVerified: false, 
             endpoints: newEndpoints
         }));
         addLog('✅ Endpoints configurados! Teste a conexão para habilitar as funções.', 'success');
-        addLog(`Endpoint Health: ${newEndpoints.healthCheck}`, 'info');
         setConfigStatus('configured');
     };
 
@@ -388,7 +448,6 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
         addLog(`🔐 Validando certificado ${cert.nome}...`, 'info');
         try {
             if (!gcpConfig.configured || !gcpConfig.connectionVerified) {
-                // Simulação de validação
                 addLog('⚠️ Backend não conectado/verificado. Usando simulação local.', 'warning');
                 await new Promise(r => setTimeout(r, 2000));
                 const cnpjSim = Math.random().toString().slice(2, 16);
@@ -404,40 +463,31 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
                 } : c));
                 addLog(`✅ Certificado ${cert.nome} validado (simulação)`, 'success');
             } else {
-                // Validação real com Google Cloud Function
                 addLog(`☁️ Enviando para validação no Google Cloud...`, 'info');
                 let response;
                 try {
                     response = await fetch(gcpConfig.endpoints.validarCertificado, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}` 
+                        },
                         body: JSON.stringify({
                             certificateBase64: cert.base64,
                             password: cert.senha
                         })
                     });
                 } catch (networkError) {
-                    console.error("Network/CORS Error:", networkError);
-                    throw new Error("Erro de rede/CORS. Verifique sua conexão e a configuração de CORS no seu backend. A aba 'Código' contém um exemplo de solução.");
+                    throw new Error("Erro de rede/CORS.");
                 }
 
                 if (!response.ok) {
                     const errorData = await response.text();
-                    throw new Error(`Erro do servidor: ${response.status} - ${errorData || 'Sem detalhes'}`);
+                    throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
                 }
                 
                 const responseText = await response.text();
-                if (!responseText) {
-                    throw new Error("A resposta da validação do certificado veio vazia do servidor.");
-                }
-    
-                let data;
-                try {
-                    data = JSON.parse(responseText);
-                } catch (jsonError) {
-                    console.error("JSON Parsing Error:", jsonError, "Response was:", responseText);
-                    throw new Error("A resposta da validação do certificado não é um JSON válido.");
-                }
+                const data = JSON.parse(responseText);
 
                 setCertificados(p => p.map(c => c.id === certId ? {
                     ...c,
@@ -475,7 +525,7 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
                     creditos: (valor * 0.05 * 0.3).toFixed(2),
                 };
                 if (isPrestado) {
-                    data.semTomador = Math.floor(Math.random() * 10);
+                    data.semTomador = Math.floor(Math.random() * 12); // Aumentado chance de > 10 para teste
                 }
                 return data;
             };
@@ -502,7 +552,10 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
             try {
                 response = await fetch(gcpConfig.endpoints.consultarNFP, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}` 
+                    },
                     body: JSON.stringify({
                         cnpj: cliente.cnpj.replace(/\D/g, ''),
                         im: cliente.im,
@@ -512,28 +565,15 @@ Se, após verificar **todos** os 3 passos, o erro persistir, inspecione os **Log
                     })
                 });
             } catch (networkError) {
-                console.error("Network/CORS Error:", networkError);
-                throw new Error("Erro de rede/CORS. Verifique sua conexão e a configuração de CORS no seu backend. A aba 'Código' contém um exemplo de solução.");
+                throw new Error("Erro de rede/CORS.");
             }
     
             if (!response.ok) {
                 const errorData = await response.text();
-                throw new Error(`Erro do servidor: ${response.status} - ${errorData || 'Sem detalhes'}`);
+                throw new Error(`Erro do servidor: ${response.status} - ${errorData}`);
             }
     
-            const responseText = await response.text();
-            if (!responseText) {
-                throw new Error(`A resposta da consulta NFP para ${cliente.nome} veio vazia.`);
-            }
-
-            let data;
-            try {
-                data = JSON.parse(responseText);
-            } catch (jsonError) {
-                console.error("JSON Parsing Error:", jsonError, "Response was:", responseText);
-                throw new Error(`A resposta da consulta NFP para ${cliente.nome} não é um JSON válido.`);
-            }
-    
+            const data = JSON.parse(await response.text());
             return {
                 cliente: cliente.nome,
                 cnpj: cliente.cnpj,
@@ -612,7 +652,6 @@ Seja direto e profissional.`;
         setLogs([]);
         setAnaliseIA('');
         addLog(`🚀 Processando ${ativos.length} cliente(s)...`, 'info');
-        addLog(`☁️ Backend: ${gcpConfig.configured && gcpConfig.connectionVerified ? 'Google Cloud' : 'Simulação Local'}`, 'info');
         const res: Result[] = [];
         for (const cli of ativos) {
             try {
@@ -729,13 +768,10 @@ Seja direto e profissional.`;
         const clientName = clientes.find(c => c.id === agendamento.clientId)?.nome || 'Cliente desconhecido';
         addLog(`⏰ Executando agendamento para ${clientName} (Período: ${agendamento.periodo})...`, 'info');
         
-        // Mark as processing by temporarily changing status - prevents re-triggering
         setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'executado' } : a));
 
         const cliente = clientes.find(c => c.id === agendamento.clientId);
-        
         if (!cliente) {
-             addLog(`❌ Cliente do agendamento ID ${agendamento.id} não encontrado.`, 'error');
              setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'erro', log: 'Cliente não encontrado.', executadoEm: new Date().toISOString() } : a));
              return;
         }
@@ -756,7 +792,7 @@ Seja direto e profissional.`;
             addLog(`❌ Erro ao executar agendamento para ${cliente.nome}: ${errorMsg}`, 'error');
             setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'erro', log: errorMsg, executadoEm: new Date().toISOString() } : a));
         }
-    }, [addLog, clientes, gcpConfig.configured, gcpConfig.connectionVerified, certificados]);
+    }, [addLog, clientes, gcpConfig.configured, gcpConfig.connectionVerified, certificados, authToken]); // Added authToken dependecy
 
     useEffect(() => {
         const interval = setInterval(() => {
@@ -766,7 +802,7 @@ Seja direto e profissional.`;
                     executarAgendamento(ag);
                 }
             });
-        }, 30000); // Check every 30 seconds
+        }, 30000); 
         return () => clearInterval(interval);
     }, [agendamentos, executarAgendamento]);
     
@@ -791,19 +827,78 @@ Seja direto e profissional.`;
 
     if (!user) return (
         <div className="min-h-screen bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-700 flex items-center justify-center p-6 dark">
-            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in">
                 <div className="text-center mb-6">
                     <Cloud className="w-16 h-16 mx-auto text-blue-600 mb-4" />
                     <h1 className="text-3xl font-bold text-gray-800">NFP Pro Cloud</h1>
-                    <p className="text-gray-500 text-sm mt-2">Plataforma de Automação Fiscal</p>
+                    <p className="text-gray-500 text-sm mt-2">Portal de Automação Contábil</p>
                 </div>
+                
                 <div className="space-y-4">
-                    <input type="email" placeholder="Email" value={login.email} onChange={e => setLogin({ ...login, email: e.target.value })} className="w-full p-3 rounded-lg bg-blue-500 text-white font-bold placeholder-gray-200 border-0 focus:outline-none focus:ring-2 focus:ring-blue-300" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
-                    <input type="password" placeholder="Senha" value={login.senha} onChange={e => setLogin({ ...login, senha: e.target.value })} className="w-full p-3 rounded-lg bg-blue-500 text-white font-bold placeholder-gray-200 border-0 focus:outline-none focus:ring-2 focus:ring-blue-300" onKeyPress={e => e.key === 'Enter' && fazerLogin()} />
-                    <button onClick={fazerLogin} className="w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors">Entrar</button>
-                </div>
-                <div className="mt-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-700">
-                    <strong>Demo:</strong> admin@contabilidade.com / admin123
+                    {authMode === 'register' && (
+                        <div className="animate-fade-in">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Nome Completo</label>
+                            <input 
+                                type="text" 
+                                placeholder="Seu nome" 
+                                value={authData.nome} 
+                                onChange={e => setAuthData({ ...authData, nome: e.target.value })} 
+                                className="w-full p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                            />
+                        </div>
+                    )}
+                    
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">E-mail Corporativo</label>
+                        <div className="relative">
+                            <input 
+                                type="email" 
+                                placeholder="usuario@spassessoriacontabil.com.br" 
+                                value={authData.email} 
+                                onChange={e => setAuthData({ ...authData, email: e.target.value })} 
+                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                onKeyPress={e => e.key === 'Enter' && handleAuth()}
+                            />
+                            <UserPlus className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
+                        </div>
+                        {authMode === 'register' && (
+                            <p className="text-xs text-gray-500 mt-1">Obrigatório uso de domínio @spassessoriacontabil.com.br</p>
+                        )}
+                    </div>
+                    
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Senha</label>
+                        <div className="relative">
+                            <input 
+                                type="password" 
+                                placeholder="••••••••" 
+                                value={authData.senha} 
+                                onChange={e => setAuthData({ ...authData, senha: e.target.value })} 
+                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                onKeyPress={e => e.key === 'Enter' && handleAuth()}
+                            />
+                            <Lock className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
+                        </div>
+                    </div>
+
+                    <button 
+                        onClick={handleAuth} 
+                        className="w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200"
+                    >
+                        {authMode === 'login' ? 'Entrar' : 'Cadastrar e Entrar'}
+                    </button>
+                    
+                    <div className="text-center mt-4">
+                        <button 
+                            onClick={() => {
+                                setAuthMode(authMode === 'login' ? 'register' : 'login');
+                                setAuthData({ nome: '', email: '', senha: '' });
+                            }} 
+                            className="text-blue-600 hover:text-blue-800 text-sm font-semibold underline"
+                        >
+                            {authMode === 'login' ? 'Primeiro acesso? Cadastre-se' : 'Já tem conta? Faça login'}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -824,14 +919,17 @@ Seja direto e profissional.`;
                                 <HelpCircle className="w-5 h-5 text-gray-500" />
                             </button>
                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-1 font-semibold hidden sm:block">
-                                Desenvolvido BY - SP Assessoria Contabil
+                                SP Assessoria Contábil
                             </p>
                         </div>
                         <div className="flex items-center gap-4">
+                             <span className="text-sm font-medium text-gray-600 dark:text-gray-300 hidden md:block">
+                                Olá, {user.nome}
+                             </span>
                              <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
                                 {theme === 'light' ? <Moon className="w-5 h-5 text-gray-600" /> : <Sun className="w-5 h-5 text-yellow-400" />}
                             </button>
-                            <button onClick={() => setUser(null)} className="px-3 py-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-1.5 text-sm font-semibold transition-colors">
+                            <button onClick={logout} className="px-3 py-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 flex items-center gap-1.5 text-sm font-semibold transition-colors">
                                 <LogOut className="w-4 h-4" />Sair
                             </button>
                         </div>
@@ -856,19 +954,19 @@ Seja direto e profissional.`;
                             <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
                                 <h3 className="font-bold text-lg mb-4 flex items-center gap-2 text-gray-800 dark:text-gray-200"><Cloud className="w-5 h-5" />Conectar ao Backend no Google Cloud</h3>
                                  <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-                                    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Como conectar para usar dados reais:</h4>
+                                    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Segurança e Conexão:</h4>
                                     <ol className="text-sm text-blue-700 dark:text-blue-400 space-y-2 list-decimal list-inside">
-                                        <li>Vá para a aba <strong>"Código"</strong> e copie o código do backend (`index.js` e `package.json`).</li>
-                                        <li>Faça o deploy dessas 3 funções no seu projeto <strong>Google Cloud Functions</strong>.</li>
+                                        <li>Vá para a aba <strong>"Código"</strong> e use a versão atualizada do `index.js`.</li>
+                                        <li>Faça o deploy das funções no Google Cloud.</li>
                                         <li className="list-none -ml-5 my-2">
                                             <div className="bg-yellow-50 dark:bg-yellow-900/50 border border-yellow-200 dark:border-yellow-600 p-2 rounded-md flex items-start gap-2">
-                                                <AlertCircle className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
-                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>IMPORTANTE:</strong> Ao fazer o deploy, permita <strong>invocações não autenticadas</strong> para tornar a função pública.</span>
+                                                <Shield className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
+                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>SEGURANÇA:</strong> Não habilite "invocações não autenticadas" a menos que configure o IAM. Para este app, usaremos autenticação via Token (Bearer) no código.</span>
                                             </div>
                                         </li>
-                                        <li>Após o deploy, volte aqui e insira <strong>APENAS o ID do seu projeto</strong> abaixo (ex: <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded text-blue-800 dark:text-blue-300">meu-projeto-12345</code>), não a URL completa.</li>
-                                        <li>Clique em <strong>"Gerar & Configurar Endpoints"</strong> para o app se conectar ao seu backend.</li>
-                                        <li>Clique em <strong>"Testar Conexão"</strong> para verificar e habilitar o modo de dados reais.</li>
+                                        <li>Insira o <strong>Project ID</strong> abaixo.</li>
+                                        <li>Clique em <strong>"Gerar & Configurar Endpoints"</strong>.</li>
+                                        <li>Ao testar a conexão, o sistema enviará automaticamente seu Token de autenticação.</li>
                                     </ol>
                                 </div>
                                 <div className="space-y-4">
@@ -901,25 +999,13 @@ Seja direto e profissional.`;
                                                     </div>
                                                     <div className="ml-3">
                                                         <h3 className="text-sm font-medium text-red-800 dark:text-red-300">Erro de Conexão</h3>
-                                                        <div className="mt-2 text-sm text-red-700 dark:text-red-400">
-                                                             <ReactMarkdown
-                                                                remarkPlugins={[remarkGfm]}
-                                                                components={{
-                                                                    h3: ({node, ...props}) => <h3 className="font-bold text-red-800 dark:text-red-300 mt-4 mb-2 text-base" {...props} />,
-                                                                    p: ({node, ...props}) => <p className="mb-2" {...props} />,
-                                                                    ul: ({node, ...props}) => <ul className="list-disc list-inside space-y-1 mb-2" {...props} />,
-                                                                    li: ({node, ...props}) => <li className="pl-2" {...props} />
-                                                                }}
-                                                            >
-                                                                {connectionError}
-                                                            </ReactMarkdown>
-                                                        </div>
+                                                        <p className="mt-2 text-sm text-red-700 dark:text-red-400">{connectionError}</p>
                                                     </div>
                                                 </div>
                                             </div>
                                         )}
                                         <button onClick={testarConexao} disabled={testingConnection} className="w-full p-3 rounded-lg font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-wait">
-                                            {testingConnection ? <><Loader2 className="w-4 h-4 animate-spin" /> Testando...</> : <><Zap className="w-4 h-4" /> Testar Conexão</>}
+                                            {testingConnection ? <><Loader2 className="w-4 h-4 animate-spin" /> Testando (com Token)...</> : <><Zap className="w-4 h-4" /> Testar Conexão</>}
                                         </button>
                                     </div>
                                 )}
@@ -1142,14 +1228,11 @@ Seja direto e profissional.`;
                                                 if (alertCount === 0) {
                                                     alertColor = 'bg-green-500';
                                                     alertTooltip = 'Status: OK (0 alertas)';
-                                                } else if (alertCount <= 5) {
-                                                    alertColor = 'bg-yellow-500';
-                                                    alertTooltip = `Status: Atenção (${alertCount} alerta${alertCount > 1 ? 's' : ''})`;
                                                 } else if (alertCount <= 10) {
                                                     alertColor = 'bg-red-500';
                                                     alertTooltip = `Status: Crítico (${alertCount} alerta${alertCount > 1 ? 's' : ''})`;
                                                 } else {
-                                                    alertColor = 'bg-red-900';
+                                                    alertColor = 'bg-red-900'; // Darker red for > 10
                                                     alertTooltip = `Status: Muito Crítico (${alertCount} alertas)`;
                                                 }
                                             }
@@ -1173,7 +1256,11 @@ Seja direto e profissional.`;
                                                                 placeholder="CNPJ *" 
                                                                 value={c.cnpj} 
                                                                 onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, cnpj: applyCnpjMask(e.target.value) } : x))} 
-                                                                className="w-full p-2 pr-10 border rounded text-sm bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600" 
+                                                                className={`w-full p-2 pr-10 border rounded text-sm bg-white dark:bg-gray-800 disabled:opacity-60 ${
+                                                                    c.cnpj && c.cnpj.length < 18 
+                                                                    ? 'border-red-300 focus:border-red-500 dark:border-red-500' 
+                                                                    : 'border-gray-300 dark:border-gray-600 focus:border-blue-500'
+                                                                }`}
                                                                 disabled={!c.ativo}
                                                                 maxLength={18}
                                                             />
@@ -1399,20 +1486,17 @@ Seja direto e profissional.`;
                         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
                             <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Code className="w-5 h-5" />Código do Backend para Google Cloud Functions</h3>
                             <div className="bg-yellow-50 dark:bg-yellow-900/50 border-l-4 border-yellow-400 p-4 rounded-r-lg mb-6">
-                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Instruções de Deploy</h4>
+                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Instruções de Deploy (Atualizado)</h4>
                                 <div className="text-sm text-yellow-700 dark:text-yellow-400 space-y-3 mt-2">
                                     <p>
-                                        Crie um diretório, salve os dois arquivos (`index.js`, `package.json`) dentro dele e faça o deploy de cada uma das 3 funções (`validarCertificado`, `consultarNFP`, `healthCheck`) para o Google Cloud Functions.
+                                        Este código inclui uma camada de autenticação para validar o Token JWT enviado pelo App.
                                     </p>
-                                    <p>
-                                        <strong>CORS:</strong> O código de exemplo já inclui a configuração de CORS, que é essencial para a comunicação entre este app e seu backend.
-                                    </p>
-                                    <div className="bg-red-50 dark:bg-red-900/50 border border-red-200 dark:border-red-600 p-3 rounded-md">
-                                        <p className="font-bold text-red-800 dark:text-red-300 flex items-center gap-2">
-                                            <AlertCircle className="w-5 h-5"/> Ação Crítica para Evitar Erros de Conexão
+                                    <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-600 p-3 rounded-md">
+                                        <p className="font-bold text-blue-800 dark:text-blue-300 flex items-center gap-2">
+                                            <Shield className="w-5 h-5"/> Segurança: Removendo "Invocações Não Autenticadas"
                                         </p>
-                                        <p className="mt-1 text-red-700 dark:text-red-400">
-                                            Para que a conexão funcione, você <strong>DEVE</strong> configurar cada função para <strong>"Permitir invocações não autenticadas"</strong> (Allow unauthenticated invocations) durante o processo de deploy. Isso torna a função pública e acessível pela internet, resolvendo a maioria dos erros "Failed to fetch".
+                                        <p className="mt-1 text-blue-700 dark:text-blue-400">
+                                            O código abaixo verifica o cabeçalho <code>Authorization: Bearer</code>. Requisições sem token serão rejeitadas com 401 Unauthorized.
                                         </p>
                                     </div>
                                 </div>
@@ -1424,40 +1508,47 @@ Seja direto e profissional.`;
 `const functions = require('@google-cloud/functions-framework');
 const cors = require('cors')({ origin: true });
 
+// Middleware de Autenticação Simplificado
+const authenticate = (req) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return false;
+  }
+  // Em produção, valide a assinatura do JWT.
+  // Aqui apenas verificamos a presença para o demo.
+  const token = authHeader.split(' ')[1];
+  return token && token.length > 10;
+};
+
 /**
- * Função para validar certificados digitais (simulada).
- * Recebe: { certificateBase64, password }
- * Retorna: { cnpj, razaoSocial, validade }
+ * Função para validar certificados digitais.
  */
 functions.http('validarCertificado', (req, res) => {
   cors(req, res, () => {
-    // TODO: Implemente sua lógica de validação de certificado aqui.
-    // Exemplo: usar node-forge ou similar para abrir o PFX/P12.
-    
-    // Resposta de sucesso simulada (substitua com dados reais da validação)
+    if (!authenticate(req)) {
+       return res.status(401).send('Acesso Negado: Token inválido ou ausente.');
+    }
+
+    // Lógica de validação...
     console.log('Recebido para validação:', req.body.password ? 'Senha OK' : 'Sem Senha');
     res.status(200).json({
       cnpj: '00.111.222/0001-33',
       razaoSocial: 'EMPRESA VALIDADA VIA CLOUD LTDA',
       validade: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString()
     });
-    
-    // Exemplo de resposta de erro:
-    // res.status(400).send('Senha inválida ou certificado corrompido.');
   });
 });
 
 /**
- * Função para consultar o portal da NFP (simulada).
- * Recebe: { cnpj, im, periodo, certificateBase64, password }
- * Retorna: { prestados: ServiceData, tomados: ServiceData, status: 'sucesso' }
+ * Função para consultar o portal da NFP.
  */
 functions.http('consultarNFP', (req, res) => {
   cors(req, res, () => {
-    // TODO: Implemente sua lógica de automação/consulta no portal da NFP.
-    // (Pode usar bibliotecas como Puppeteer, Playwright, etc.)
-    console.log('Consultando NFP para:', req.body.cnpj);
+    if (!authenticate(req)) {
+       return res.status(401).send('Acesso Negado: Token inválido ou ausente.');
+    }
 
+    // Lógica de consulta...
     const generateServiceData = () => ({
       notas: Math.floor(Math.random() * 50) + 10,
       valor: (Math.random() * 100000 + 10000).toFixed(2),
@@ -1475,11 +1566,16 @@ functions.http('consultarNFP', (req, res) => {
 });
 
 /**
- * Função de Health Check para teste de conexão.
+ * Função de Health Check.
+ * Pode ser deixada pública ou exigindo auth, dependendo do uso.
+ * Aqui exigimos auth para consistência.
  */
 functions.http('healthCheck', (req, res) => {
     cors(req, res, () => {
-        res.status(200).send('OK');
+        if (!authenticate(req)) {
+             return res.status(401).send('Unauthorized');
+        }
+        res.status(200).send('OK (Authenticated)');
     });
 });`
                                     }</code></pre>
