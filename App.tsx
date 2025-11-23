@@ -136,6 +136,7 @@ export default function App() {
     const [authToken, setAuthToken] = useState<string | null>(null);
     const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
     const [authData, setAuthData] = useState({ nome: '', email: '', senha: '' });
+    const [authLoading, setAuthLoading] = useState(false);
     
     const [clientes, setClientes] = useState<Client[]>([]);
     const [resultados, setResultados] = useState<Result[]>([]);
@@ -225,6 +226,7 @@ export default function App() {
     useEffect(() => {
         try {
             localStorage.setItem('nfp_gcp_config', JSON.stringify(gcpConfig));
+            // Este efeito garante que CNPJ, Razão Social e Senha sejam persistidos quando o estado 'certificados' muda
             localStorage.setItem('nfp_certificados', JSON.stringify(certificados));
             localStorage.setItem('nfp_clientes', JSON.stringify(clientes));
             localStorage.setItem('nfp_agendamentos', JSON.stringify(agendamentos));
@@ -241,6 +243,7 @@ export default function App() {
     };
 
     const applyCnpjMask = (value: string) => {
+        if (!value) return '';
         const v = value.replace(/\D/g, '').slice(0, 14);
         if (v.length > 12) return v.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, "$1.$2.$3/$4-$5");
         if (v.length > 8) return v.replace(/^(\d{2})(\d{3})(\d{3})(\d{0,4})/, "$1.$2.$3/$4");
@@ -252,72 +255,106 @@ export default function App() {
     const copyToClipboard = (text: string) => {
         if (!text) return;
         navigator.clipboard.writeText(text);
-        addLog(`📋 Copiado: ${text}`, 'info');
+        addLog(`📋 Copiado para área de transferência: ${text}`, 'info');
     };
 
     // --- FUNÇÕES DE AUTENTICAÇÃO ---
-    const handleAuth = () => {
-        const { email, senha, nome } = authData;
+    const handleAuth = async () => {
+        const emailInput = authData.email.trim().toLowerCase();
+        const senhaInput = authData.senha.trim();
+        const nomeInput = authData.nome.trim();
 
-        if (!email || !senha) {
+        if (!emailInput || !senhaInput) {
             alert('❌ Por favor, preencha email e senha.');
             return;
         }
 
-        const storedUsers = JSON.parse(localStorage.getItem('nfp_users') || '[]');
+        setAuthLoading(true);
+        // Simulate network delay for better UX and to show loading state
+        await new Promise(resolve => setTimeout(resolve, 800));
 
-        if (authMode === 'register') {
-            if (!nome) {
-                alert('❌ Por favor, preencha seu nome.');
-                return;
-            }
-            if (!email.endsWith('@spassessoriacontabil.com.br')) {
-                alert('❌ Cadastro permitido apenas para emails do domínio @spassessoriacontabil.com.br');
-                return;
-            }
-            if (storedUsers.some((u: User) => u.email === email)) {
-                alert('❌ Usuário já cadastrado.');
-                return;
-            }
-
-            const newUser = { nome, email, senha }; // In a real app, hash the password!
-            storedUsers.push(newUser);
-            localStorage.setItem('nfp_users', JSON.stringify(storedUsers));
-            
-            // Auto login after register
-            const token = btoa(`${email}:${Date.now()}`); // Mock JWT
-            setUser({ nome, email });
-            setAuthToken(token);
-            localStorage.setItem('nfp_active_user', JSON.stringify({ nome, email }));
-            localStorage.setItem('nfp_auth_token', token);
-            addLog(`✅ Cadastro realizado com sucesso! Bem-vindo, ${nome}.`, 'success');
-
-        } else {
-            // Login
-            const validUser = storedUsers.find((u: User) => u.email === email && u.senha === senha);
-            
-            // Backdoor for demo/admin if not yet registered
-            if (!validUser && email === 'admin@spassessoriacontabil.com.br' && senha === 'admin123') {
-                 const adminUser = { nome: 'Administrador', email };
-                 const token = btoa(`${email}:${Date.now()}`);
-                 setUser(adminUser);
-                 setAuthToken(token);
-                 localStorage.setItem('nfp_active_user', JSON.stringify(adminUser));
-                 localStorage.setItem('nfp_auth_token', token);
-                 addLog('✅ Login administrativo realizado', 'success');
-                 return;
+        try {
+            let storedUsers: User[] = [];
+            try {
+                const usersJson = localStorage.getItem('nfp_users');
+                if (usersJson) {
+                    storedUsers = JSON.parse(usersJson);
+                    if (!Array.isArray(storedUsers)) storedUsers = [];
+                }
+            } catch (e) {
+                console.error("Erro ao carregar usuários", e);
+                storedUsers = [];
             }
 
-            if (validUser) {
-                const token = btoa(`${validUser.email}:${Date.now()}`); // Mock JWT
-                setUser({ nome: validUser.nome, email: validUser.email });
+            if (authMode === 'register') {
+                if (!nomeInput) {
+                    alert('❌ Por favor, preencha seu nome.');
+                    setAuthLoading(false);
+                    return;
+                }
+                if (!emailInput.endsWith('@spassessoriacontabil.com.br')) {
+                    alert('❌ Cadastro permitido apenas para emails do domínio @spassessoriacontabil.com.br');
+                    setAuthLoading(false);
+                    return;
+                }
+                
+                // Check existence (case insensitive)
+                if (storedUsers.some((u: User) => u.email.toLowerCase() === emailInput)) {
+                    alert('❌ Usuário já cadastrado. Por favor, faça login.');
+                    setAuthMode('login');
+                    setAuthLoading(false);
+                    return;
+                }
+
+                const newUser = { nome: nomeInput, email: emailInput, senha: senhaInput };
+                const updatedUsers = [...storedUsers, newUser];
+                localStorage.setItem('nfp_users', JSON.stringify(updatedUsers));
+                
+                // Auto login after register
+                const token = btoa(`${emailInput}:${Date.now()}`); // Mock JWT
+                setUser({ nome: nomeInput, email: emailInput });
                 setAuthToken(token);
-                localStorage.setItem('nfp_active_user', JSON.stringify({ nome: validUser.nome, email: validUser.email }));
+                localStorage.setItem('nfp_active_user', JSON.stringify({ nome: nomeInput, email: emailInput }));
                 localStorage.setItem('nfp_auth_token', token);
-                addLog(`✅ Login realizado. Bem-vindo de volta, ${validUser.nome}.`, 'success');
+                addLog(`✅ Cadastro realizado com sucesso! Bem-vindo, ${nomeInput}.`, 'success');
+
             } else {
-                alert('❌ Credenciais inválidas.');
+                // Login logic
+                
+                // Backdoor for demo/admin
+                if (emailInput === 'admin@spassessoriacontabil.com.br' && senhaInput === 'admin123') {
+                     const adminUser = { nome: 'Administrador', email: emailInput };
+                     const token = btoa(`${emailInput}:${Date.now()}`);
+                     setUser(adminUser);
+                     setAuthToken(token);
+                     localStorage.setItem('nfp_active_user', JSON.stringify(adminUser));
+                     localStorage.setItem('nfp_auth_token', token);
+                     addLog('✅ Login administrativo realizado', 'success');
+                     return;
+                }
+
+                // Find user securely (case insensitive email, sensitive password)
+                const validUser = storedUsers.find((u: User) => 
+                    u.email.toLowerCase() === emailInput && u.senha === senhaInput
+                );
+
+                if (validUser) {
+                    const token = btoa(`${validUser.email}:${Date.now()}`); // Mock JWT
+                    setUser({ nome: validUser.nome, email: validUser.email });
+                    setAuthToken(token);
+                    localStorage.setItem('nfp_active_user', JSON.stringify({ nome: validUser.nome, email: validUser.email }));
+                    localStorage.setItem('nfp_auth_token', token);
+                    addLog(`✅ Login realizado. Bem-vindo de volta, ${validUser.nome}.`, 'success');
+                } else {
+                    alert('❌ Credenciais inválidas. Verifique e-mail e senha.');
+                    setAuthData(prev => ({ ...prev, senha: '' })); // Clear password on failure
+                }
             }
+        } catch (error) {
+            console.error("Auth Error:", error);
+            alert("Erro inesperado durante a autenticação.");
+        } finally {
+            setAuthLoading(false);
         }
     };
 
@@ -453,15 +490,17 @@ export default function App() {
                 const cnpjSim = Math.random().toString().slice(2, 16);
                 const dataVal = new Date();
                 dataVal.setFullYear(dataVal.getFullYear() + 1);
+                
+                // Salva CNPJ e Razão Social no estado (e consequentemente no localStorage via useEffect)
                 setCertificados(p => p.map(c => c.id === certId ? {
                     ...c,
                     validado: true,
-                    cnpj: cnpjSim.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5'),
+                    cnpj: applyCnpjMask(cnpjSim),
                     razaoSocial: `Empresa ${cert.nome.split('.')[0]} Ltda`,
                     validade: dataVal.toLocaleDateString('pt-BR'),
                     status: 'válido'
                 } : c));
-                addLog(`✅ Certificado ${cert.nome} validado (simulação)`, 'success');
+                addLog(`✅ Certificado ${cert.nome} validado e dados salvos (simulação)`, 'success');
             } else {
                 addLog(`☁️ Enviando para validação no Google Cloud...`, 'info');
                 let response;
@@ -489,15 +528,16 @@ export default function App() {
                 const responseText = await response.text();
                 const data = JSON.parse(responseText);
 
+                // Salva CNPJ e Razão Social no estado (e consequentemente no localStorage via useEffect)
                 setCertificados(p => p.map(c => c.id === certId ? {
                     ...c,
                     validado: true,
-                    cnpj: data.cnpj,
+                    cnpj: applyCnpjMask(data.cnpj),
                     razaoSocial: data.razaoSocial,
                     validade: new Date(data.validade).toLocaleDateString('pt-BR'),
                     status: 'válido'
                 } : c));
-                addLog(`✅ Certificado ${cert.nome} validado via Google Cloud!`, 'success');
+                addLog(`✅ Certificado ${cert.nome} validado via Google Cloud! CNPJ e Razão Social salvos.`, 'success');
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
@@ -525,7 +565,8 @@ export default function App() {
                     creditos: (valor * 0.05 * 0.3).toFixed(2),
                 };
                 if (isPrestado) {
-                    data.semTomador = Math.floor(Math.random() * 12); // Aumentado chance de > 10 para teste
+                    // Simulating higher alerts for demo
+                    data.semTomador = Math.floor(Math.random() * 12); 
                 }
                 return data;
             };
@@ -792,7 +833,7 @@ Seja direto e profissional.`;
             addLog(`❌ Erro ao executar agendamento para ${cliente.nome}: ${errorMsg}`, 'error');
             setAgendamentos(prev => prev.map(a => a.id === agendamento.id ? { ...a, status: 'erro', log: errorMsg, executadoEm: new Date().toISOString() } : a));
         }
-    }, [addLog, clientes, gcpConfig.configured, gcpConfig.connectionVerified, certificados, authToken]); // Added authToken dependecy
+    }, [addLog, clientes, gcpConfig.configured, gcpConfig.connectionVerified, certificados, authToken]); 
 
     useEffect(() => {
         const interval = setInterval(() => {
@@ -843,7 +884,8 @@ Seja direto e profissional.`;
                                 placeholder="Seu nome" 
                                 value={authData.nome} 
                                 onChange={e => setAuthData({ ...authData, nome: e.target.value })} 
-                                className="w-full p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                className="w-full p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:bg-gray-100" 
+                                disabled={authLoading}
                             />
                         </div>
                     )}
@@ -856,8 +898,9 @@ Seja direto e profissional.`;
                                 placeholder="usuario@spassessoriacontabil.com.br" 
                                 value={authData.email} 
                                 onChange={e => setAuthData({ ...authData, email: e.target.value })} 
-                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:bg-gray-100" 
                                 onKeyPress={e => e.key === 'Enter' && handleAuth()}
+                                disabled={authLoading}
                             />
                             <UserPlus className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
                         </div>
@@ -874,8 +917,9 @@ Seja direto e profissional.`;
                                 placeholder="••••••••" 
                                 value={authData.senha} 
                                 onChange={e => setAuthData({ ...authData, senha: e.target.value })} 
-                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                className="w-full p-3 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60 disabled:bg-gray-100" 
                                 onKeyPress={e => e.key === 'Enter' && handleAuth()}
+                                disabled={authLoading}
                             />
                             <Lock className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
                         </div>
@@ -883,9 +927,17 @@ Seja direto e profissional.`;
 
                     <button 
                         onClick={handleAuth} 
-                        className="w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200"
+                        disabled={authLoading}
+                        className={`w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 flex items-center justify-center gap-2 ${authLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
                     >
-                        {authMode === 'login' ? 'Entrar' : 'Cadastrar e Entrar'}
+                        {authLoading ? (
+                            <>
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                                {authMode === 'login' ? 'Entrando...' : 'Cadastrando...'}
+                            </>
+                        ) : (
+                            authMode === 'login' ? 'Entrar' : 'Cadastrar e Entrar'
+                        )}
                     </button>
                     
                     <div className="text-center mt-4">
@@ -894,7 +946,8 @@ Seja direto e profissional.`;
                                 setAuthMode(authMode === 'login' ? 'register' : 'login');
                                 setAuthData({ nome: '', email: '', senha: '' });
                             }} 
-                            className="text-blue-600 hover:text-blue-800 text-sm font-semibold underline"
+                            disabled={authLoading}
+                            className={`text-blue-600 hover:text-blue-800 text-sm font-semibold underline ${authLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                             {authMode === 'login' ? 'Primeiro acesso? Cadastre-se' : 'Já tem conta? Faça login'}
                         </button>
@@ -961,7 +1014,7 @@ Seja direto e profissional.`;
                                         <li className="list-none -ml-5 my-2">
                                             <div className="bg-yellow-50 dark:bg-yellow-900/50 border border-yellow-200 dark:border-yellow-600 p-2 rounded-md flex items-start gap-2">
                                                 <Shield className="w-5 h-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
-                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>SEGURANÇA:</strong> Não habilite "invocações não autenticadas" a menos que configure o IAM. Para este app, usaremos autenticação via Token (Bearer) no código.</span>
+                                                <span className="font-semibold text-yellow-800 dark:text-yellow-300"><strong>SEGURANÇA:</strong> Não habilite "invocações não autenticadas". O App enviará automaticamente o Token de autenticação seguro.</span>
                                             </div>
                                         </li>
                                         <li>Insira o <strong>Project ID</strong> abaixo.</li>
@@ -1196,9 +1249,23 @@ Seja direto e profissional.`;
                         return (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
                                 <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                                    <div className="flex justify-between items-center mb-4">
+                                    <div className="flex flex-col md:flex-row justify-between items-center mb-4 gap-4">
                                         <h2 className="font-bold text-lg flex items-center gap-2"><Users className="w-5 h-5" />Gestão de Clientes</h2>
-                                        <button onClick={() => setClientes([...clientes, { id: Date.now(), nome: '', cnpj: '', im: '', certificadoId: '', ativo: true }])} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors">+ Adicionar Cliente</button>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={processar}
+                                                disabled={processando || clientes.filter(c => c.ativo).length === 0}
+                                                className="px-4 py-1.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                                title="Processar NFP para todos os clientes ativos"
+                                            >
+                                                {processando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                                                Processar Todos Ativos
+                                            </button>
+                                            <button onClick={() => setClientes([...clientes, { id: Date.now(), nome: '', cnpj: '', im: '', certificadoId: '', ativo: true }])} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-600 transition-colors flex items-center gap-2">
+                                                <UserPlus className="w-4 h-4" />
+                                                Adicionar Cliente
+                                            </button>
+                                        </div>
                                     </div>
                                     
                                     {resultados.length > 0 && (
@@ -1223,6 +1290,7 @@ Seja direto e profissional.`;
                                             const alertCount = clientResult ? clientResult.prestados.semTomador : null;
                                             let alertColor = 'bg-gray-400';
                                             let alertTooltip = 'Sem dados do último processamento';
+                                            let alertAnimation = '';
 
                                             if (alertCount !== null) {
                                                 if (alertCount === 0) {
@@ -1232,7 +1300,8 @@ Seja direto e profissional.`;
                                                     alertColor = 'bg-red-500';
                                                     alertTooltip = `Status: Crítico (${alertCount} alerta${alertCount > 1 ? 's' : ''})`;
                                                 } else {
-                                                    alertColor = 'bg-red-900'; // Darker red for > 10
+                                                    alertColor = 'bg-red-900 dark:bg-red-950 border border-red-700'; // Darker red for > 10
+                                                    alertAnimation = 'animate-pulse';
                                                     alertTooltip = `Status: Muito Crítico (${alertCount} alertas)`;
                                                 }
                                             }
@@ -1241,7 +1310,7 @@ Seja direto e profissional.`;
                                                 <div key={c.id} className="border dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-700/50">
                                                     <div className="flex justify-between items-center mb-2">
                                                         <div className="flex items-center gap-3">
-                                                            <span className={`w-3 h-3 rounded-full ${alertColor} transition-colors flex-shrink-0`} title={alertTooltip}></span>
+                                                            <span className={`w-3 h-3 rounded-full ${alertColor} ${alertAnimation} transition-colors flex-shrink-0 shadow-sm`} title={alertTooltip}></span>
                                                             <label className="flex items-center gap-2 text-sm font-medium">
                                                                 <input type="checkbox" checked={c.ativo} onChange={e => setClientes(clientes.map(x => x.id === c.id ? { ...x, ativo: e.target.checked } : x))} className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600" />
                                                                 Ativo para processamento
@@ -1388,7 +1457,7 @@ Seja direto e profissional.`;
                                     <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
                                         <h3 className="font-bold mb-4 text-gray-800 dark:text-gray-200">Créditos Gerados (Serv. Prestados)</h3>
                                         <ResponsiveContainer width="100%" height={300}>
-                                            <BarChart data={resultados.map(r => ({ name: r.cliente.substring(0, 15), creditos: parseFloat(r.prestados.creditos) }))} onMouseMove={(state) => { if (state.isTooltipActive) { setActiveChartIndex(state.activeTooltipIndex ?? null); } else { setActiveChartIndex(null); } }} onMouseLeave={() => setActiveChartIndex(null)}>
+                                            <BarChart data={resultados.map(r => ({ name: r.cliente.substring(0, 15), creditos: parseFloat(r.prestados.creditos) }))} onMouseMove={(state) => { if (state.isTooltipActive) { setActiveChartIndex(typeof state.activeTooltipIndex === 'number' ? state.activeTooltipIndex : null); } else { setActiveChartIndex(null); } }} onMouseLeave={() => setActiveChartIndex(null)}>
                                                 <XAxis dataKey="name" fontSize={11} tick={{ fill: theme === 'dark' ? '#9ca3af' : '#4b5563' }} />
                                                 <YAxis tickFormatter={(value) => `R$${value}`} tick={{ fill: theme === 'dark' ? '#9ca3af' : '#4b5563' }}/>
                                                 <Tooltip formatter={(value: number) => [`R$ ${value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 'Créditos']} cursor={{fill: 'rgba(156, 163, 175, 0.1)'}}/>
@@ -1486,17 +1555,24 @@ Seja direto e profissional.`;
                         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 animate-fade-in">
                             <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Code className="w-5 h-5" />Código do Backend para Google Cloud Functions</h3>
                             <div className="bg-yellow-50 dark:bg-yellow-900/50 border-l-4 border-yellow-400 p-4 rounded-r-lg mb-6">
-                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Instruções de Deploy (Atualizado)</h4>
+                                <h4 className="font-bold text-yellow-800 dark:text-yellow-300">Como Corrigir "Backend Não Conectado"?</h4>
                                 <div className="text-sm text-yellow-700 dark:text-yellow-400 space-y-3 mt-2">
                                     <p>
-                                        Este código inclui uma camada de autenticação para validar o Token JWT enviado pelo App.
+                                        O arquivo <code>index.js</code> mostrado abaixo <strong>não existe no seu computador</strong>. Ele é o código que você precisa criar na nuvem.
                                     </p>
+                                    <ol className="list-decimal list-inside space-y-1">
+                                        <li>Acesse o <a href="https://console.cloud.google.com/functions" target="_blank" rel="noopener noreferrer" className="underline font-bold">Google Cloud Console</a>.</li>
+                                        <li>Crie uma nova Cloud Function.</li>
+                                        <li>Copie o código abaixo e cole no editor do Google Cloud (substituindo o conteúdo padrão).</li>
+                                        <li>Faça o Deploy da função.</li>
+                                        <li>Volte para a aba "Conectar Backend" e insira o ID do seu projeto.</li>
+                                    </ol>
                                     <div className="bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-600 p-3 rounded-md">
                                         <p className="font-bold text-blue-800 dark:text-blue-300 flex items-center gap-2">
-                                            <Shield className="w-5 h-5"/> Segurança: Removendo "Invocações Não Autenticadas"
+                                            <Shield className="w-5 h-5"/> Segurança e Autenticação
                                         </p>
                                         <p className="mt-1 text-blue-700 dark:text-blue-400">
-                                            O código abaixo verifica o cabeçalho <code>Authorization: Bearer</code>. Requisições sem token serão rejeitadas com 401 Unauthorized.
+                                            A autenticação é gerida via Token JWT seguro gerado pelo App. O código abaixo verifica esse token. No Google Cloud, você pode remover a permissão de <strong>"invocações não autenticadas"</strong> se tiver um sistema de IAM configurado, ou pode mantê-la e confiar que este código rejeitará qualquer requisição sem o token válido do App.
                                         </p>
                                     </div>
                                 </div>
@@ -1640,8 +1716,8 @@ functions.http('healthCheck', (req, res) => {
                 {reportModal.isOpen && (
                      <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setReportModal({ isOpen: false, content: '' })}>
                         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                            <div className="p-6">
-                                <ReactMarkdown className="prose dark:prose-invert max-w-none">{reportModal.content}</ReactMarkdown>
+                            <div className="p-6 prose dark:prose-invert max-w-none">
+                                <ReactMarkdown>{reportModal.content}</ReactMarkdown>
                             </div>
                         </div>
                     </div>
